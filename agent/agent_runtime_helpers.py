@@ -1201,6 +1201,32 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     client_kwargs = dict(client_kwargs)
     _validate_proxy_env_urls()
     _validate_base_url(client_kwargs.get("base_url"))
+    # For Azure Cognitive Services endpoints (cognitiveservices.azure.com), use the
+    # AzureOpenAI client which sends the correct `api-key` header and handles
+    # api-version and URL construction properly — matching the Offenlegung pattern.
+    _raw_base_url = client_kwargs.get("base_url") or ""
+    if "cognitiveservices.azure.com" in _raw_base_url or "openai.azure.com" in _raw_base_url:
+        from urllib.parse import urlparse, parse_qs
+        _parsed = urlparse(_raw_base_url)
+        _query_params = {k: v[0] for k, v in parse_qs(_parsed.query).items()}
+        _api_version = _query_params.get("api-version", "2025-04-01-preview")
+        _azure_endpoint = f"{_parsed.scheme}://{_parsed.netloc}"
+        from openai import AzureOpenAI
+        azure_kwargs = {
+            "azure_endpoint": _azure_endpoint,
+            "api_version": _api_version,
+            "api_key": client_kwargs.get("api_key"),
+        }
+        if "timeout" in client_kwargs:
+            azure_kwargs["timeout"] = client_kwargs["timeout"]
+        if "http_client" in client_kwargs:
+            azure_kwargs["http_client"] = client_kwargs["http_client"]
+        client = AzureOpenAI(**azure_kwargs)
+        _ra().logger.info(
+            "AzureOpenAI client created (%s, shared=%s) %s",
+            reason, shared, agent._client_log_context(),
+        )
+        return client
     if agent.provider == "copilot-acp" or str(client_kwargs.get("base_url", "")).startswith("acp://copilot"):
         from agent.copilot_acp_client import CopilotACPClient
 

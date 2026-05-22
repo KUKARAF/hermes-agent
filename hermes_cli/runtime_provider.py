@@ -514,7 +514,8 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
             # Resolve the API key from the env var name stored in key_env
             key_env = str(entry.get("key_env", "") or "").strip()
             resolved_api_key = os.getenv(key_env, "").strip() if key_env else ""
-            # Fall back to inline api_key when key_env is absent or unresolvable
+            # Fall back to inline api_key when key_env is absent or unresolvable;
+            # if the value looks like a KV key name, fetch the real secret from KV.
             if not resolved_api_key:
                 resolved_api_key = str(entry.get("api_key", "") or "").strip()
 

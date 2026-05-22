@@ -1,0 +1,41 @@
+name: zulip-platform
+label: Zulip
+kind: platform
+version: 1.0.0
+description: >
+  Zulip gateway adapter for Hermes Agent.
+  Connects to a Zulip server and relays stream/topic and DM messages
+  to the Hermes agent via the long-poll event queue API.
+author: rafa
+
+requires_env:
+  - name: ZULIP_SERVER_URL
+    description: "Zulip server base URL (e.g. https://osmosis.zulipchat.com)"
+    prompt: "Zulip server URL"
+    password: false
+  - name: ZULIP_BOT_EMAIL
+    description: "Bot email address (from Zulip Settings → Bots)"
+    prompt: "Bot email"
+    password: false
+  - name: ZULIP_API_KEY
+    description: "API key for the bot (from Zulip Settings → Bots)"
+    prompt: "API key"
+    password: true
+
+optional_env:
+  - name: ZULIP_ALLOWED_USERS
+    description: "Comma-separated Zulip user emails allowed to talk to the bot"
+    prompt: "Allowed users (comma-separated)"
+    password: false
+  - name: ZULIP_ALLOW_ALL_USERS
+    description: "Set to 'true' to allow any user (dev/test only)"
+    prompt: "Allow all users? (true/false)"
+    password: false
+  - name: ZULIP_HOME_CHANNEL
+    description: "Default stream:topic for cron delivery (e.g. general:bot)"
+    prompt: "Home channel"
+    password: false
+  - name: ZULIP_REQUIRE_MENTION
+    description: "Only respond when the bot is @mentioned in streams (default: true)"
+    prompt: "Require mention? (true/false)"
+    password: false
