@@ -6308,8 +6308,8 @@ class GatewayRunner:
         # Zulip: user_id_alt carries the sender's email (set by the adapter).
         # Add it to check_ids so email-format allowlist entries match even
         # when the platform reports a numeric sender_id.
-        if source.platform.value == "zulip" and user_id_alt:
-            check_ids.add(user_id_alt.lower())
+        if source.platform.value == "zulip" and source.user_id_alt:
+            check_ids.add(source.user_id_alt.lower())
 
         # WhatsApp: resolve phone↔LID aliases from bridge session mapping files
         if source.platform == Platform.WHATSAPP:
