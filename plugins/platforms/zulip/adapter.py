@@ -281,6 +281,7 @@ class ZulipAdapter(BasePlatformAdapter):
             chat_type=chat_type,
             user_id=str(msg.get("sender_id", "")),
             user_name=sender_email,
+            user_id_alt=sender_email,  # email for allowlist matching in gateway
             thread_id=topic or None,
         )
 
