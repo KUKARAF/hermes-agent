@@ -248,7 +248,12 @@ class ZulipAdapter(BasePlatformAdapter):
 
         is_dm = msg["type"] == "private"
 
-        if not is_dm and self.require_mention:
+        # Slash commands are self-identifying via "/" — never filter them out
+        # for lack of an @mention, even when require_mention is True.
+        text_content = msg.get("content", "")
+        is_slash_command = text_content.strip().startswith("/")
+
+        if not is_dm and self.require_mention and not is_slash_command:
             flags = event.get("flags", [])
             if "mentioned" not in flags and "wildcard_mentioned" not in flags:
                 return
