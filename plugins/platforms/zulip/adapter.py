@@ -25,6 +25,7 @@ import asyncio
 import datetime
 import logging
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -39,6 +40,20 @@ from gateway.platforms.base import (
 from gateway.config import Platform
 from gateway.session import SessionSource  # noqa: F401 (used via build_source)
 
+
+# ---------------------------------------------------------------------------
+# Module-level constants
+# ---------------------------------------------------------------------------
+
+# Matches Zulip file-upload markdown links: [label](/user_uploads/...)
+_ZULIP_UPLOAD_RE = re.compile(r'\[([^\]]*)\]\((/user_uploads/[^)]+)\)')
+
+_EXT_TO_MIME: Dict[str, str] = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".gif": "image/gif", ".webp": "image/webp",
+    ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".ogg": "audio/ogg",
+    ".wav": "audio/wav", ".opus": "audio/opus",
+}
 
 # ---------------------------------------------------------------------------
 # Adapter
@@ -63,7 +78,7 @@ class ZulipAdapter(BasePlatformAdapter):
         if _req_mention_env:
             self.require_mention = _req_mention_env.lower() not in {"0", "false", "no"}
         else:
-            self.require_mention = extra.get("require_mention", True)
+            self.require_mention = extra.get("require_mention", False)
 
         allowed_env = os.getenv("ZULIP_ALLOWED_USERS", "")
         allowed_extra = extra.get("allowed_users", "")
@@ -236,6 +251,61 @@ class ZulipAdapter(BasePlatformAdapter):
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
 
+    # ── Attachment extraction ─────────────────────────────────────────────
+
+    async def _extract_attachments(self, text: str):
+        """Parse /user_uploads/ links from message text, download and cache them.
+
+        Returns (media_urls, media_types, message_type).
+        """
+        from gateway.platforms.base import (
+            cache_image_from_bytes,
+            cache_audio_from_bytes,
+            cache_document_from_bytes,
+            SUPPORTED_DOCUMENT_TYPES,
+        )
+
+        media_urls: List[str] = []
+        media_types: List[str] = []
+        msg_type = MessageType.TEXT
+
+        for label, path in _ZULIP_UPLOAD_RE.findall(text):
+            url = f"{self.server_url}{path}"
+            ext = os.path.splitext(path)[-1].lower() or os.path.splitext(label)[-1].lower()
+            mime = _EXT_TO_MIME.get(ext, "application/octet-stream")
+
+            try:
+                resp = await self._client.get(url, timeout=30.0)
+                resp.raise_for_status()
+                data = resp.content
+            except Exception as e:
+                logger.warning("Zulip: failed to download attachment %s: %s", url, e)
+                continue
+
+            try:
+                if mime.startswith("image/"):
+                    cached = cache_image_from_bytes(data, ext=ext or ".jpg")
+                    media_urls.append(cached)
+                    media_types.append(mime)
+                    msg_type = MessageType.PHOTO
+                elif mime.startswith("audio/"):
+                    cached = cache_audio_from_bytes(data, ext=ext or ".ogg")
+                    media_urls.append(cached)
+                    media_types.append(mime)
+                    if msg_type == MessageType.TEXT:
+                        msg_type = MessageType.VOICE
+                elif ext in SUPPORTED_DOCUMENT_TYPES:
+                    filename = os.path.basename(label) or os.path.basename(path)
+                    cached = cache_document_from_bytes(data, filename)
+                    media_urls.append(cached)
+                    media_types.append(mime)
+                    if msg_type == MessageType.TEXT:
+                        msg_type = MessageType.DOCUMENT
+            except Exception as e:
+                logger.warning("Zulip: failed to cache attachment %s: %s", url, e)
+
+        return media_urls, media_types, msg_type
+
     # ── Event handling ────────────────────────────────────────────────────
 
     async def _handle_event(self, event: Dict) -> None:
@@ -248,10 +318,12 @@ class ZulipAdapter(BasePlatformAdapter):
 
         is_dm = msg["type"] == "private"
 
-        # Slash commands are self-identifying via "/" — never filter them out
-        # for lack of an @mention, even when require_mention is True.
         text_content = msg.get("content", "")
-        is_slash_command = text_content.strip().startswith("/")
+        # Strip Zulip @mention markup (@**Name** / @_**Name**) so that
+        # "@**Hermes Bot** /help" becomes "/help" before any routing logic.
+        text_content = re.sub(r'@_?\*{2}[^*]+\*{2}', '', text_content).strip()
+
+        is_slash_command = text_content.startswith("/")
 
         if not is_dm and self.require_mention and not is_slash_command:
             flags = event.get("flags", [])
@@ -290,12 +362,16 @@ class ZulipAdapter(BasePlatformAdapter):
             thread_id=topic or None,
         )
 
+        media_urls, media_types, msg_type = await self._extract_attachments(text_content)
+
         message_event = MessageEvent(
-            text=msg["content"],
-            message_type=MessageType.TEXT,
+            text=text_content,
+            message_type=msg_type,
             source=source,
             message_id=str(msg["id"]),
             raw_message=event,
+            media_urls=media_urls,
+            media_types=media_types,
             timestamp=datetime.datetime.fromtimestamp(msg.get("timestamp", time.time())),
         )
 
