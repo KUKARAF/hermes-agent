@@ -274,6 +274,29 @@ def _apply_external_secret_sources(home_path: Path) -> None:
             file=sys.stderr,
         )
 
+    # --- online_kv ---
+    online_kv_cfg = (cfg or {}).get("online_kv") or {}
+    if not online_kv_cfg.get("enabled"):
+        return
+    try:
+        from agent.secret_sources.online_kv import apply_online_kv_secrets
+    except ImportError:
+        return
+    result = apply_online_kv_secrets(
+        enabled=True,
+        token_env=online_kv_cfg.get("token_env", "KV_TOKEN"),
+        keys=online_kv_cfg.get("keys"),
+        override_existing=bool(online_kv_cfg.get("override_existing", False)),
+        cache_ttl_seconds=float(online_kv_cfg.get("cache_ttl_seconds", 300)),
+    )
+    if result.applied:
+        _sanitize_loaded_credentials()
+        for name in result.applied:
+            _SECRET_SOURCES[name] = "online_kv"
+        print(f"  online_kv: applied {len(result.applied)} secret(s)", file=sys.stderr)
+    if result.error:
+        print(f"  online_kv: {result.error}", file=sys.stderr)
+
 
 def _load_secrets_config(home_path: Path) -> dict:
     """Read just the ``secrets:`` section out of config.yaml.

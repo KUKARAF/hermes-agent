@@ -10986,15 +10986,23 @@ def main():
         help="Bitwarden Secrets Manager integration",
     )
 
+    secrets_okv = secrets_subparsers.add_parser(
+        "online_kv",
+        help="online_kv key-value store integration (kv.osmosis.page)",
+    )
+
     # Lazy import — only pays for itself when this subcommand is actually used.
     from hermes_cli import secrets_cli as _secrets_cli
 
-    _secrets_cli.register_cli(secrets_bw)
+    _secrets_cli.register_cli(secrets_okv)
 
     def _dispatch_secrets(args):  # noqa: ANN001
         sub = getattr(args, "secrets_command", None)
         bw_sub = getattr(args, "secrets_bw_command", None)
+        okv_sub = getattr(args, "secrets_okv_command", None)
         if sub in ("bitwarden", "bw") and bw_sub is not None:
+            return args.func(args)
+        if sub == "online_kv" and okv_sub is not None:
             return args.func(args)
         secrets_parser.print_help()
         return 0
