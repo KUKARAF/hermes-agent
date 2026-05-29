@@ -44,15 +44,20 @@ class TestCreateOpenAIClientCallable:
 
     def test_callable_api_key_passed_to_openai_constructor(self, monkeypatch):
         """Construct the smallest possible AIAgent surface and verify
-        the OpenAI client receives the callable unchanged."""
+        the OpenAI client receives the callable unchanged.
+
+        azure-foundry + openai.azure.com URLs route to AzureOpenAI, so we
+        patch that class instead of run_agent.OpenAI.
+        """
         captured = {}
 
-        def fake_openai(**kwargs):
+        def fake_azure_openai(**kwargs):
             captured["kwargs"] = kwargs
             return MagicMock(api_key=kwargs.get("api_key"))
 
-        # Patch the module-level OpenAI proxy used by ``_create_openai_client``.
-        monkeypatch.setattr("run_agent.OpenAI", fake_openai)
+        # azure-foundry with openai.azure.com routes to AzureOpenAI via a
+        # local import inside _create_openai_client.
+        monkeypatch.setattr("openai.AzureOpenAI", fake_azure_openai)
 
         # Build a minimal stand-in for AIAgent so we can call the bound
         # method directly without paying the full __init__ cost.
@@ -74,7 +79,7 @@ class TestCreateOpenAIClientCallable:
         }
         client = agent._create_openai_client(client_kwargs, reason="test", shared=False)
 
-        # The OpenAI constructor must receive the *callable*, not a string.
+        # The AzureOpenAI constructor must receive the *callable*, not a string.
         forwarded = captured["kwargs"]["api_key"]
         assert callable(forwarded)
         assert not isinstance(forwarded, str)
