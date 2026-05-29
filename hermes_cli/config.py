@@ -4156,30 +4156,6 @@ def _expand_env_vars(obj):
     return obj
 
 
-_KV_KEY_RE = re.compile(r'^[A-Z][A-Z0-9_]{2,}$')
-
-
-def _resolve_kv_api_keys(obj):
-    """Recursively resolve KV key references in ``api_key`` config fields.
-
-    If an ``api_key`` value looks like a KV key name (all-uppercase letters,
-    digits, and underscores — e.g. ``AZURE_OPENAI_API_KEY``), fetch the real
-    secret from the online_pykv server. All other values are left untouched.
-    """
-    if isinstance(obj, dict):
-        result = {}
-        for k, v in obj.items():
-            if k == "api_key" and isinstance(v, str) and _KV_KEY_RE.match(v.strip()):
-                from online_pykv import KVClient
-                result[k] = KVClient().get(v.strip())
-            else:
-                result[k] = _resolve_kv_api_keys(v)
-        return result
-    if isinstance(obj, list):
-        return [_resolve_kv_api_keys(item) for item in obj]
-    return obj
-
-
 def _items_by_unique_name(items):
     """Return a name-indexed dict only when all items have unique string names."""
     if not isinstance(items, list):
@@ -4465,7 +4441,7 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
                 _warn_config_parse_failure(config_path, e)
 
         normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
-        expanded = _resolve_kv_api_keys(_expand_env_vars(normalized))
+        expanded = _expand_env_vars(normalized)
         _LAST_EXPANDED_CONFIG_BY_PATH[path_key] = copy.deepcopy(expanded)
         if cache_key is not None:
             # Cache stores a separate deepcopy so subsequent ``load_config()``
