@@ -37,6 +37,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+import yaml
+
+from hermes_cli.config import load_config as _load_hermes_config
+
 logger = logging.getLogger(__name__)
 
 SUPPORTED_LANGUAGES: tuple[str, ...] = (
@@ -132,18 +136,16 @@ def _load_catalog(lang: str) -> dict[str, str]:
     path = _locales_dir() / f"{lang}.yaml"
     if not path.is_file():
         logger.debug("i18n catalog missing for %s at %s", lang, path)
-        with _catalog_lock:
-            _catalog_cache[lang] = {}
+        # Do NOT cache the miss — the file may appear later (install, restart)
+        # and we want the next call to retry rather than stay permanently empty.
         return {}
 
     try:
-        import yaml  # PyYAML is already a hermes dependency
         with path.open("r", encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
-    except Exception as exc:
+    except (OSError, yaml.YAMLError) as exc:
         logger.warning("Failed to load i18n catalog %s: %s", path, exc)
-        with _catalog_lock:
-            _catalog_cache[lang] = {}
+        # Do NOT cache the failure so the next call retries (transient I/O error).
         return {}
 
     flat: dict[str, str] = {}
@@ -173,12 +175,11 @@ def _config_language_cached() -> str | None:
     (e.g. after the setup wizard).
     """
     try:
-        from hermes_cli.config import load_config
-        cfg = load_config()
+        cfg = _load_hermes_config()
         lang = (cfg.get("display") or {}).get("language")
         if lang:
             return _normalize_lang(lang)
-    except Exception as exc:
+    except (ImportError, OSError, KeyError, TypeError, ValueError) as exc:
         logger.debug("Could not read display.language from config: %s", exc)
     return None
 

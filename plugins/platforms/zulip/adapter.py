@@ -29,16 +29,22 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger(__name__)
+import httpx
 
+from gateway.config import Platform
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
     SendResult,
+    cache_audio_from_bytes,
+    cache_document_from_bytes,
+    cache_image_from_bytes,
+    SUPPORTED_DOCUMENT_TYPES,
 )
-from gateway.config import Platform
 from gateway.session import SessionSource  # noqa: F401 (used via build_source)
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -118,16 +124,6 @@ class ZulipAdapter(BasePlatformAdapter):
             )
             return False
 
-        try:
-            import httpx
-        except ImportError:
-            self._set_fatal_error(
-                "missing_dep",
-                "httpx is required: pip install httpx",
-                retryable=False,
-            )
-            return False
-
         self._client = httpx.AsyncClient(
             auth=(self.bot_email, self.api_key),
             timeout=120.0,
@@ -140,7 +136,7 @@ class ZulipAdapter(BasePlatformAdapter):
             )
             resp.raise_for_status()
             data = resp.json()
-        except Exception as e:
+        except (httpx.HTTPError, httpx.RequestError, OSError) as e:
             logger.error("Zulip: failed to register event queue: %s", e)
             await self._client.aclose()
             self._client = None
@@ -173,7 +169,7 @@ class ZulipAdapter(BasePlatformAdapter):
                     params={"queue_id": self._queue_id},
                     timeout=10.0,
                 )
-            except Exception:
+            except (httpx.HTTPError, httpx.RequestError, OSError):
                 pass
 
         if self._client:
@@ -205,7 +201,7 @@ class ZulipAdapter(BasePlatformAdapter):
                         if event.get("type") == "message":
                             try:
                                 await self._handle_event(event)
-                            except Exception as e:
+                            except (KeyError, ValueError, RuntimeError, OSError) as e:
                                 logger.warning("Zulip: error handling event %s: %s", event.get("id"), e)
 
                 elif resp.status_code == 400:
@@ -223,7 +219,7 @@ class ZulipAdapter(BasePlatformAdapter):
 
             except asyncio.CancelledError:
                 raise
-            except Exception as e:
+            except (httpx.HTTPError, httpx.RequestError, OSError, RuntimeError) as e:
                 if not self.is_connected:
                     break
                 logger.error("Zulip: poll error: %s", e)
@@ -246,7 +242,7 @@ class ZulipAdapter(BasePlatformAdapter):
                 return
             except asyncio.CancelledError:
                 raise
-            except Exception as e:
+            except (httpx.HTTPError, httpx.RequestError, OSError, RuntimeError) as e:
                 logger.error("Zulip: re-register failed: %s — retrying in %ss", e, backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
@@ -258,13 +254,6 @@ class ZulipAdapter(BasePlatformAdapter):
 
         Returns (media_urls, media_types, message_type).
         """
-        from gateway.platforms.base import (
-            cache_image_from_bytes,
-            cache_audio_from_bytes,
-            cache_document_from_bytes,
-            SUPPORTED_DOCUMENT_TYPES,
-        )
-
         media_urls: List[str] = []
         media_types: List[str] = []
         msg_type = MessageType.TEXT
@@ -278,7 +267,7 @@ class ZulipAdapter(BasePlatformAdapter):
                 resp = await self._client.get(url, timeout=30.0)
                 resp.raise_for_status()
                 data = resp.content
-            except Exception as e:
+            except (httpx.HTTPError, httpx.RequestError, OSError) as e:
                 logger.warning("Zulip: failed to download attachment %s: %s", url, e)
                 continue
 
@@ -301,7 +290,7 @@ class ZulipAdapter(BasePlatformAdapter):
                     media_types.append(mime)
                     if msg_type == MessageType.TEXT:
                         msg_type = MessageType.DOCUMENT
-            except Exception as e:
+            except (OSError, ValueError, RuntimeError) as e:
                 logger.warning("Zulip: failed to cache attachment %s: %s", url, e)
 
         return media_urls, media_types, msg_type
@@ -415,7 +404,7 @@ class ZulipAdapter(BasePlatformAdapter):
             resp = await self._client.post(self._api("messages"), data=data)
             resp.raise_for_status()
             return SendResult(success=True, message_id=str(resp.json().get("id", "")))
-        except Exception as e:
+        except (httpx.HTTPError, httpx.RequestError, OSError) as e:
             return SendResult(success=False, error=str(e), retryable=True)
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
@@ -443,8 +432,28 @@ class ZulipAdapter(BasePlatformAdapter):
                     },
                     timeout=5.0,
                 )
-        except Exception:
+        except (httpx.HTTPError, httpx.RequestError, OSError):
             pass
+
+    async def send_exec_approval(
+        self,
+        chat_id: str,
+        command: str,
+        session_key: str,
+        description: str = "dangerous command",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send a dangerous-command approval prompt with the full command text."""
+        # Zulip messages cap at 10 000 chars; reserve ~200 for surrounding text.
+        cmd_preview = command[:9800] + "..." if len(command) > 9800 else command
+        msg = (
+            f":warning: **Dangerous command requires approval:**\n"
+            f"```\n{cmd_preview}\n```\n"
+            f"Reason: {description}\n\n"
+            f"Reply `/approve` to execute, `/approve session` to approve this pattern "
+            f"for the session, `/approve always` to approve permanently, or `/deny` to cancel."
+        )
+        return await self.send(chat_id, msg, metadata=metadata)
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         if chat_id.startswith("dm_"):
@@ -520,8 +529,6 @@ async def _standalone_send(
     force_document: bool = False,
 ) -> Dict[str, Any]:
     """Out-of-process send for cron delivery (no running adapter required)."""
-    import httpx
-
     extra = getattr(pconfig, "extra", {}) or {}
     server_url = (os.getenv("ZULIP_SERVER_URL") or extra.get("server_url", "")).rstrip("/")
     bot_email = os.getenv("ZULIP_BOT_EMAIL") or extra.get("bot_email", "")
@@ -559,7 +566,7 @@ async def _standalone_send(
             resp = await client.post(f"{server_url}/api/v1/messages", data=data)
             resp.raise_for_status()
             return {"success": True, "message_id": str(resp.json().get("id", ""))}
-    except Exception as e:
+    except (httpx.HTTPError, httpx.RequestError, OSError) as e:
         return {"error": f"Zulip standalone send failed: {e}"}
 
 
