@@ -2802,7 +2802,7 @@ wheels = [
 [[package]]
 name = "online-pykv"
 version = "0.1.0"
-source = { git = "https://github.com/KUKARAF/online_pykv.git#c2ce05494da4585ed7edf26355026831f3f5fcc2" }
+source = { git = "https://github.com/KUKARAF/online_pykv.git#c7db2a5" }
 dependencies = [
     { name = "qrcode" },
     { name = "tomli-w" },
