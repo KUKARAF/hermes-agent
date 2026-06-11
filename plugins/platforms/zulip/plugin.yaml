@@ -39,3 +39,9 @@ optional_env:
     description: "Only respond when the bot is @mentioned in streams (default: true)"
     prompt: "Require mention? (true/false)"
     password: false
+  - name: KV_SESSION_NOTIFY_CHAT
+    description: >
+      Where to deliver KV Manager session approval links (format: dm_<user_id>
+      or stream_name:topic). Falls back to ZULIP_HOME_CHANNEL if not set.
+    prompt: "KV session notify chat (e.g. dm_12345 or general:kv-session)"
+    password: false
