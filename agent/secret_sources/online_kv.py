@@ -1,19 +1,21 @@
-"""online_kv store (kv.osmosis.page) integration."""
+"""online_kv store (kv.osmosis.page) integration via KVClient."""
 
 from __future__ import annotations
 
 import logging
 import os
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional
+
+from online_pykv import KVClient, KVError, NotFoundError  # noqa: F401 (re-exported)
+
+try:
+    from online_pykv.kv_session import make_kv_auth_error_handler
+except ImportError:
+    make_kv_auth_error_handler = None  # type: ignore[assignment, misc]
 
 logger = logging.getLogger(__name__)
-
-_KV_STORE_BASE = "https://kv.osmosis.page"
-_KV_HTTP_TIMEOUT = 15
 
 _CACHE: Dict[str, "_CachedFetch"] = {}
 
@@ -42,67 +44,72 @@ class FetchResult:
         return self.error is None
 
 
-def _http_get(url: str, token: str) -> str:
-    req = urllib.request.Request(
-        url,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "User-Agent": "hermes-agent",
-        },
+_DEFAULT_KEYS: List[str] = [
+    # Messaging / communication platforms
+    "HASS_TOKEN",
+    "TELEGRAM_BOT_TOKEN",
+    "DISCORD_BOT_TOKEN",
+    "SLACK_BOT_TOKEN",
+    "SLACK_APP_TOKEN",
+    "WHATSAPP_BOT_TOKEN",
+    "MATTERMOST_TOKEN",
+    "MATRIX_ACCESS_TOKEN",
+    "SIGNAL_TOKEN",
+    "ZULIP_API_KEY",
+    "WECOM_WEBHOOK_SECRET",
+    "DINGTALK_APP_SECRET",
+    "FEISHU_APP_SECRET",
+    "QQBOT_SECRET",
+    "WEIXIN_TOKEN",
+    "BLUEBUBBLES_PASSWORD",
+    # Dev / VCS
+    "GITHUB_TOKEN",
+    "GITLAB_TOKEN",
+    "BITBUCKET_APP_PASSWORD",
+    # LLM providers
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GOOGLE_API_KEY",
+    "ELEVENLABS_API_KEY",
+    "MINIMAX_API_KEY",
+    "MISTRAL_API_KEY",
+    "XAI_API_KEY",
+    "NOVITA_API_KEY",
+    "LM_API_KEY",
+    "AI_GATEWAY_API_KEY",
+    "AZURE_ANTHROPIC_KEY",
+    "AZURE_FOUNDRY_API_KEY",
+    "OPENROUTER_API_KEY",
+    "CUSTOM_API_KEY",
+    # Search / browser tools
+    "FIRECRAWL_API_KEY",
+    "EXA_API_KEY",
+    "TAVILY_API_KEY",
+    "BROWSERBASE_API_KEY",
+    "BROWSERBASE_PROJECT_ID",
+    "BROWSER_USE_API_KEY",
+    "DAYTONA_API_KEY",
+    # Cloud / infra
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AZURE_CLIENT_SECRET",
+]
+
+
+def _make_auth_error_handler(notify_chat_id: Optional[str]) -> Optional[Callable[[], str]]:
+    """Return a Zulip-based auth error handler, or None to use the terminal QR flow."""
+    if make_kv_auth_error_handler is None:
+        return None
+    return make_kv_auth_error_handler(
+        notify_chat_id=notify_chat_id,
+        label="hermes-agent",
     )
-    with urllib.request.urlopen(req, timeout=_KV_HTTP_TIMEOUT) as resp:
-        return resp.read().decode("utf-8", errors="replace")
-
-
-def fetch_kv_secrets(
-    *,
-    keys: List[str],
-    token: str,
-    cache_ttl_seconds: float = 300,
-    use_cache: bool = True,
-) -> Tuple[Dict[str, str], List[str]]:
-    if not token:
-        raise RuntimeError("KV_TOKEN is empty")
-    if not keys:
-        return {}, []
-
-    secrets: Dict[str, str] = {}
-    warnings: List[str] = []
-
-    for key in keys:
-        cache_key = key
-        if use_cache:
-            cached = _CACHE.get(cache_key)
-            if cached and cached.is_fresh(cache_ttl_seconds):
-                secrets[key] = cached.value
-                continue
-
-        url = f"{_KV_STORE_BASE}/{key.lstrip('/')}"
-        try:
-            value = _http_get(url, token)
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404:
-                warnings.append(f"Key {key!r} not found in KV store")
-                _CACHE[cache_key] = _CachedFetch(value="", fetched_at=time.time())
-                continue
-            raise RuntimeError(
-                f"HTTP {exc.code} fetching {key!r} from KV store: {exc.reason}"
-            ) from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(
-                f"Network error fetching {key!r} from KV store: {exc.reason}"
-            ) from exc
-
-        secrets[key] = value
-        _CACHE[cache_key] = _CachedFetch(value=value, fetched_at=time.time())
-
-    return secrets, warnings
 
 
 def apply_online_kv_secrets(
     *,
     enabled: bool,
-    token_env: str = "KV_TOKEN",
+    notify_chat_id: Optional[str] = None,
     keys: Optional[List[str]] = None,
     override_existing: bool = False,
     cache_ttl_seconds: float = 300,
@@ -111,63 +118,33 @@ def apply_online_kv_secrets(
     if not enabled:
         return result
 
-    token = os.environ.get(token_env, "").strip()
-    if not token:
-        result.error = (
-            f"secrets.online_kv.enabled is true but {token_env} is "
-            "not set.  Set KV_TOKEN in your .env file."
-        )
-        return result
-
-    secret_keys = keys or [
-        "HASS_TOKEN",
-        "TELEGRAM_BOT_TOKEN",
-        "DISCORD_BOT_TOKEN",
-        "SLACK_BOT_TOKEN",
-        "WHATSAPP_BOT_TOKEN",
-        "MATTERMOST_TOKEN",
-        "MATRIX_ACCESS_TOKEN",
-        "SIGNAL_TOKEN",
-        "ZULIP_API_KEY",
-        "WECOM_WEBHOOK_SECRET",
-        "DINGTALK_APP_SECRET",
-        "FEISHU_APP_SECRET",
-        "QQBOT_SECRET",
-        "WEIXIN_TOKEN",
-        "BLUEBUBBLES_PASSWORD",
-        "GITHUB_TOKEN",
-        "GITLAB_TOKEN",
-        "BITBUCKET_APP_PASSWORD",
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "GOOGLE_API_KEY",
-        "ELEVENLABS_API_KEY",
-        "MINIMAX_API_KEY",
-        "MISTRAL_API_KEY",
-        "FIRECRAWL_API_KEY",
-        "FIRECRAWL_API_URL",
-        "EXA_API_KEY",
-        "TAVILY_API_KEY",
-        "BROWSERBASE_API_KEY",
-        "BROWSERBASE_PROJECT_ID",
-        "BROWSER_USE_API_KEY",
-        "BWS_ACCESS_TOKEN",
-    ]
+    secret_keys = keys or _DEFAULT_KEYS
 
     try:
-        secrets, warnings = fetch_kv_secrets(
-            keys=secret_keys,
-            token=token,
-            cache_ttl_seconds=cache_ttl_seconds,
+        on_auth_error = _make_auth_error_handler(notify_chat_id)
+        client = KVClient(
+            on_auth_error=on_auth_error,
+            request_label="hermes-agent",
+            request_show_qr=True,
         )
-    except RuntimeError as exc:
+    except KVError as exc:
         result.error = str(exc)
         return result
 
-    result.secrets = secrets
-    result.warnings.extend(warnings)
+    for key in secret_keys:
+        cached = _CACHE.get(key)
+        if cached and cached.is_fresh(cache_ttl_seconds):
+            result.secrets[key] = cached.value
+            continue
+        try:
+            value = client.get_or_default(key, default="")
+        except KVError as exc:
+            result.warnings.append(f"Error fetching {key!r}: {exc}")
+            continue
+        result.secrets[key] = value
+        _CACHE[key] = _CachedFetch(value=value, fetched_at=time.time())
 
-    for key, value in secrets.items():
+    for key, value in result.secrets.items():
         if not value:
             continue
         if not override_existing and os.environ.get(key):

@@ -13,10 +13,13 @@ This module provides:
 """
 
 import copy
+import getpass
+import json
 import logging
 import os
 import platform
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -25,6 +28,43 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
+from urllib.parse import urlparse
+
+import yaml
+
+from hermes_cli.colors import Colors, color
+from hermes_cli.default_soul import DEFAULT_SOUL_MD
+from hermes_constants import get_hermes_home, is_container  # noqa: F811
+from utils import atomic_replace, atomic_yaml_write
+
+try:
+    from agent.skill_utils import (  # type: ignore
+        discover_all_skill_config_vars as _discover_all_skill_config_vars,
+        resolve_skill_config_values as _resolve_skill_config_values,
+        SKILL_CONFIG_PREFIX as _SKILL_CONFIG_PREFIX,
+    )
+    _HAS_SKILL_UTILS = True
+except ImportError:
+    _HAS_SKILL_UTILS = False
+    _SKILL_CONFIG_PREFIX = "skills.config"
+
+try:
+    from agent.redact import mask_secret as _mask_secret  # type: ignore
+    _HAS_REDACT = True
+except ImportError:
+    _HAS_REDACT = False
+
+try:
+    from hermes_cli.auth import get_anthropic_key as _get_anthropic_key  # type: ignore
+    _HAS_AUTH = True
+except ImportError:
+    _HAS_AUTH = False
+
+try:
+    from providers import list_providers as _list_providers  # type: ignore
+    _HAS_PROVIDERS = True
+except ImportError:
+    _HAS_PROVIDERS = False
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +107,7 @@ def _warn_config_parse_failure(config_path: Path, exc: Exception) -> None:
     try:
         sys.stderr.write(f"⚠️  hermes config: {msg}\n")
         sys.stderr.flush()
-    except Exception:
+    except (OSError, ValueError):
         pass
 
 _IS_WINDOWS = platform.system() == "Windows"
@@ -144,10 +184,6 @@ _EXTRA_ENV_KEYS = frozenset({
     "LANGFUSE_SECRET_KEY",
     "LANGFUSE_BASE_URL",
 })
-import yaml
-
-from hermes_cli.colors import Colors, color
-from hermes_cli.default_soul import DEFAULT_SOUL_MD
 
 
 # =============================================================================
@@ -221,7 +257,6 @@ def detect_install_method(project_root: Optional[Path] = None) -> str:
     managed = get_managed_system()
     if managed:
         return managed.lower().replace(" ", "-")
-    from hermes_constants import is_container
     if is_container():
         return "docker"
     if project_root is None:
@@ -250,7 +285,6 @@ def recommended_update_command_for_method(method: str) -> str:
     if method == "docker":
         return "docker pull nousresearch/hermes-agent:latest"
     if method == "pip":
-        import shutil
         uv = shutil.which("uv")
         if uv:
             return "uv pip install --upgrade hermes-agent"
@@ -318,7 +352,6 @@ def get_container_exec_info() -> Optional[dict]:
     if os.environ.get("HERMES_DEV") == "1":
         return None
 
-    from hermes_constants import is_container
     if is_container():
         return None
 
@@ -352,10 +385,6 @@ def get_container_exec_info() -> Optional[dict]:
 # =============================================================================
 # Config paths
 # =============================================================================
-
-# Re-export from hermes_constants — canonical definition lives there.
-from hermes_constants import get_hermes_home  # noqa: F811,E402
-from utils import atomic_replace
 
 def get_config_path() -> Path:
     """Get the main config file path."""
@@ -1776,6 +1805,22 @@ DEFAULT_CONFIG = {
             # bws yourself and have it on PATH.
             "auto_install": True,
         },
+        "online_kv": {
+            # Fetch API keys from kv.osmosis.page on startup.
+            # The session token is stored in ~/.config/kv/config.toml and
+            # renewed automatically via Zulip notification when it expires.
+            # ZULIP_API_KEY / ZULIP_BOT_EMAIL / ZULIP_SERVER_URL are the
+            # only bootstrap secrets that still need to be in ~/.hermes/.env.
+            "enabled": True,
+            # Where to send the KV approval link when a new session is needed.
+            # Format: "dm_<user_id>" or "stream_name:topic".
+            # Falls back to KV_SESSION_NOTIFY_CHAT / ZULIP_HOME_CHANNEL env vars.
+            "notify_chat_id": "",
+            # Seconds to cache fetched values in-process.  0 disables.
+            "cache_ttl_seconds": 300,
+            # When True, KV values overwrite env vars already set by .env files.
+            "override_existing": False,
+        },
     },
 
     # Config schema version - bump this when adding new required fields
@@ -2978,19 +3023,16 @@ def get_missing_skill_config_vars() -> List[Dict[str, Any]]:
     which ones are absent or empty under ``skills.config.<key>`` in the user's
     config.yaml.  Returns a list of dicts suitable for prompting.
     """
-    try:
-        from agent.skill_utils import discover_all_skill_config_vars, SKILL_CONFIG_PREFIX
-    except Exception:
+    if not _HAS_SKILL_UTILS:
         return []
 
     try:
-        all_vars = discover_all_skill_config_vars()
-    except Exception as e:
+        all_vars = _discover_all_skill_config_vars()
+    except (OSError, ValueError, KeyError, AttributeError, TypeError) as e:
         # A malformed SKILL.md, unreadable external skill dir, or similar
         # should never break `hermes update`.  Skill-config prompting is a
         # post-migration nicety, not a blocker.
-        import logging
-        logging.getLogger(__name__).debug(
+        logger.debug(
             "discover_all_skill_config_vars failed: %s", e
         )
         return []
@@ -3001,7 +3043,7 @@ def get_missing_skill_config_vars() -> List[Dict[str, Any]]:
     missing: List[Dict[str, Any]] = []
     for var in all_vars:
         # Skill config is stored under skills.config.<logical_key>
-        storage_key = f"{SKILL_CONFIG_PREFIX}.{var['key']}"
+        storage_key = f"{_SKILL_CONFIG_PREFIX}.{var['key']}"
         parts = storage_key.split(".")
         current = config
         value = None
@@ -3064,8 +3106,6 @@ def _normalize_custom_provider_entry(
             "providers.%s: unknown config keys ignored: %s",
             provider_key or "?", ", ".join(sorted(unknown)),
         )
-
-    from urllib.parse import urlparse
 
     base_url = ""
     for url_key in ("base_url", "url", "api"):
@@ -3243,7 +3283,7 @@ def get_custom_provider_context_length(
     if custom_providers is None:
         try:
             custom_providers = get_compatible_custom_providers(config)
-        except Exception:
+        except (TypeError, ValueError, KeyError, AttributeError):
             if config is None:
                 return None
             raw = config.get("custom_providers")
@@ -3337,7 +3377,7 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
     if config is None:
         try:
             config = load_config()
-        except Exception:
+        except (yaml.YAMLError, OSError, ValueError, TypeError):
             return [ConfigIssue("error", "Could not load config.yaml", "Run 'hermes setup' to create a valid config")]
 
     issues: List[ConfigIssue] = []
@@ -3479,7 +3519,7 @@ def print_config_warnings(config: Optional[Dict[str, Any]] = None) -> None:
     """
     try:
         issues = validate_config_structure(config)
-    except Exception:
+    except (yaml.YAMLError, OSError, ValueError, TypeError, AttributeError):
         return
     if not issues:
         return
@@ -3504,7 +3544,7 @@ def warn_deprecated_cwd_env_vars(config: Optional[Dict[str, Any]] = None) -> Non
     if config is None:
         try:
             config = load_config()
-        except Exception:
+        except (yaml.YAMLError, OSError, ValueError, TypeError):
             return
 
     terminal_cfg = config.get("terminal", {})
@@ -3555,7 +3595,7 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
         fixes = sanitize_env_file()
         if fixes and not quiet:
             print(f"  ✓ Repaired .env file ({fixes} corrupted entries fixed)")
-    except Exception:
+    except (OSError, IOError, ValueError, UnicodeDecodeError):
         pass  # best-effort; don't block migration on sanitize failure
 
     # Check config version
@@ -3609,7 +3649,7 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                 save_env_value("ANTHROPIC_TOKEN", "")
                 if not quiet:
                     print("  ✓ Cleared ANTHROPIC_TOKEN from .env (no longer used)")
-        except Exception:
+        except (OSError, IOError, KeyError, ValueError):
             pass
 
     # ── Version 11 → 12: migrate custom_providers list → providers dict ──
@@ -3639,10 +3679,9 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                 if not key:
                     # Fallback: derive from URL hostname
                     try:
-                        from urllib.parse import urlparse
                         parsed = urlparse(old_url)
                         key = (parsed.hostname or "endpoint").replace(".", "-")
-                    except Exception:
+                    except ValueError:
                         key = f"endpoint-{migrated_count}"
 
                 # Don't overwrite existing entries
@@ -3687,7 +3726,7 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                     save_env_value(dead_var, "")
                     if not quiet:
                         print(f"  ✓ Cleared {dead_var} from .env (no longer used — config.yaml is source of truth)")
-            except Exception:
+            except (OSError, IOError, KeyError, ValueError):
                 pass
 
     # ── Version 13 → 14: migrate legacy flat stt.model to provider section ──
@@ -3853,13 +3892,13 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                         try:
                             with open(manifest_file, encoding="utf-8") as _mf:
                                 manifest = yaml.safe_load(_mf) or {}
-                        except Exception:
+                        except (yaml.YAMLError, OSError):
                             manifest = {}
                         name = manifest.get("name") or child.name
                         if name in disabled_set:
                             continue
                         grandfathered.append(name)
-            except Exception:
+            except OSError:
                 grandfathered = []
 
             plugins_cfg["enabled"] = grandfathered
@@ -3903,7 +3942,7 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
         try:
             curator_dir = get_hermes_home() / "logs" / "curator"
             curator_dir.mkdir(parents=True, exist_ok=True)
-        except Exception as e:
+        except OSError as e:
             results["warnings"].append(f"Could not create {curator_dir}: {e}")
 
         config = read_raw_config()
@@ -3982,11 +4021,10 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                 print(f"  Get your key at: {var['url']}")
             
             if var.get("password"):
-                import getpass
                 value = getpass.getpass(f"  {var['prompt']}: ")
             else:
                 value = input(f"  {var['prompt']}: ").strip()
-            
+
             if value:
                 save_env_value(var["name"], value)
                 results["env_added"].append(var["name"])
@@ -4034,7 +4072,6 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                     else:
                         print(f"  {info.get('description', name)}")
                     if info.get("password"):
-                        import getpass
                         value = getpass.getpass(f"  {info.get('prompt', name)} (Enter to skip): ")
                     else:
                         value = input(f"  {info.get('prompt', name)} (Enter to skip): ").strip()
@@ -4089,10 +4126,6 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
         if answer in {"y", "yes"}:
             print()
             config = load_config()
-            try:
-                from agent.skill_utils import SKILL_CONFIG_PREFIX
-            except Exception:
-                SKILL_CONFIG_PREFIX = "skills.config"
             for var in missing_skill_config:
                 default = var.get("default", "")
                 default_hint = f" (default: {default})" if default else ""
@@ -4100,7 +4133,7 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                 if not value and default:
                     value = str(default)
                 if value:
-                    storage_key = f"{SKILL_CONFIG_PREFIX}.{var['key']}"
+                    storage_key = f"{_SKILL_CONFIG_PREFIX}.{var['key']}"
                     _set_nested(config, storage_key, value)
                     results["config_added"].append(var["key"])
                     print(f"  ✓ Saved {var['key']} = {value}")
@@ -4356,7 +4389,7 @@ def read_raw_config() -> Dict[str, Any]:
         try:
             with open(config_path, encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
-        except Exception as e:
+        except (yaml.YAMLError, OSError) as e:
             _warn_config_parse_failure(config_path, e)
             return {}
 
@@ -4437,7 +4470,7 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
                     user_config.pop("max_turns", None)
 
                 config = _deep_merge(config, user_config)
-            except Exception as e:
+            except (ValueError, TypeError, AttributeError) as e:
                 _warn_config_parse_failure(config_path, e)
 
         normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
@@ -4546,7 +4579,6 @@ def save_config(config: Dict[str, Any]):
         if is_managed():
             managed_error("save configuration")
             return
-        from utils import atomic_yaml_write
 
         ensure_hermes_home()
         config_path = get_config_path()
@@ -4609,7 +4641,7 @@ def load_env() -> Dict[str, str]:
         cache_key = (str(env_path), mtime, size)
     except FileNotFoundError:
         cache_key = (str(env_path), None, None)
-    except Exception:
+    except OSError:
         cache_key = None
 
     if cache_key is not None and _env_cache is not None:
@@ -4756,7 +4788,7 @@ def sanitize_env_file() -> int:
             f.flush()
             os.fsync(f.fileno())
         atomic_replace(tmp_path, env_path)
-    except BaseException:
+    except OSError:
         try:
             os.unlink(tmp_path)
         except OSError:
@@ -4866,7 +4898,7 @@ def save_env_value(key: str, value: str):
                 os.chmod(env_path, original_mode)
             except OSError:
                 pass
-    except BaseException:
+    except OSError:
         try:
             os.unlink(tmp_path)
         except OSError:
@@ -4922,7 +4954,7 @@ def remove_env_value(key: str) -> bool:
                     os.chmod(env_path, original_mode)
                 except OSError:
                     pass
-        except BaseException:
+        except OSError:
             try:
                 os.unlink(tmp_path)
             except OSError:
@@ -5009,8 +5041,9 @@ def redact_key(key: str) -> str:
     Thin wrapper over :func:`agent.redact.mask_secret` — preserves the
     "(not set)" placeholder in dim color for the empty case.
     """
-    from agent.redact import mask_secret
-    return mask_secret(key, empty=color("(not set)", Colors.DIM))
+    if not _HAS_REDACT:
+        return key if key else color("(not set)", Colors.DIM)
+    return _mask_secret(key, empty=color("(not set)", Colors.DIM))
 
 
 def show_config():
@@ -5048,8 +5081,7 @@ def show_config():
     for env_key, name in keys:
         value = get_env_value(env_key)
         print(f"  {name:<14} {redact_key(value)}")
-    from hermes_cli.auth import get_anthropic_key
-    anthropic_value = get_anthropic_key()
+    anthropic_value = _get_anthropic_key() if _HAS_AUTH else None
     print(f"  {'Anthropic':<14} {redact_key(anthropic_value)}")
     
     # Model settings
@@ -5159,21 +5191,21 @@ def show_config():
     print(f"  Discord:      {'configured' if discord_token else color('not configured', Colors.DIM)}")
     
     # Skill config
-    try:
-        from agent.skill_utils import discover_all_skill_config_vars, resolve_skill_config_values
-        skill_vars = discover_all_skill_config_vars()
-        if skill_vars:
-            resolved = resolve_skill_config_values(skill_vars)
-            print()
-            print(color("◆ Skill Settings", Colors.CYAN, Colors.BOLD))
-            for var in skill_vars:
-                key = var["key"]
-                value = resolved.get(key, "")
-                skill_name = var.get("skill", "")
-                display_val = str(value) if value else color("(not set)", Colors.DIM)
-                print(f"  {key:<20s} {display_val}  {color(f'[{skill_name}]', Colors.DIM)}")
-    except Exception:
-        pass
+    if _HAS_SKILL_UTILS:
+        try:
+            skill_vars = _discover_all_skill_config_vars()
+            if skill_vars:
+                resolved = _resolve_skill_config_values(skill_vars)
+                print()
+                print(color("◆ Skill Settings", Colors.CYAN, Colors.BOLD))
+                for var in skill_vars:
+                    key = var["key"]
+                    value = resolved.get(key, "")
+                    skill_name = var.get("skill", "")
+                    display_val = str(value) if value else color("(not set)", Colors.DIM)
+                    print(f"  {key:<20s} {display_val}  {color(f'[{skill_name}]', Colors.DIM)}")
+        except (OSError, ValueError, KeyError, AttributeError, TypeError):
+            pass
 
     print()
     print(color("─" * 60, Colors.DIM))
@@ -5203,9 +5235,7 @@ def edit_config():
         # land on a working editor (notepad) even without Git Bash or nano
         # installed.  On POSIX, prefer nano/vim over code/notepad because
         # it's more likely to be present on headless / server systems.
-        import shutil
-        import sys as _sys
-        if _sys.platform == "win32":
+        if sys.platform == "win32":
             candidates = ['notepad', 'code', 'vim', 'vi', 'nano']
         else:
             candidates = ['nano', 'vim', 'vi', 'code', 'notepad']
@@ -5255,7 +5285,7 @@ def set_config_value(key: str, value: str):
         try:
             with open(config_path, encoding="utf-8") as f:
                 user_config = yaml.safe_load(f) or {}
-        except Exception:
+        except (yaml.YAMLError, OSError):
             user_config = {}
     
     # Handle nested keys (e.g., "tts.provider") including numeric list
@@ -5277,7 +5307,6 @@ def set_config_value(key: str, value: str):
     
     # Write only user config back (not the full merged defaults)
     ensure_hermes_home()
-    from utils import atomic_yaml_write
     atomic_yaml_write(config_path, user_config, sort_keys=False)
     
     # Keep .env in sync for keys that terminal_tool reads directly from env vars.
@@ -5468,9 +5497,10 @@ def _inject_profile_env_vars() -> None:
     if _profile_env_vars_injected:
         return
     _profile_env_vars_injected = True
+    if not _HAS_PROVIDERS:
+        return
     try:
-        from providers import list_providers
-        for _pp in list_providers():
+        for _pp in _list_providers():
             if _pp.auth_type not in {"api_key",}:
                 continue
             for _var in _pp.env_vars:
@@ -5485,7 +5515,7 @@ def _inject_profile_env_vars() -> None:
                     "category": "provider",
                     "advanced": True,
                 }
-    except Exception:
+    except (AttributeError, TypeError, ValueError):
         pass
 
 
@@ -5527,8 +5557,7 @@ def _inject_platform_plugin_env_vars() -> None:
         return
     _platform_plugin_env_vars_injected = True
     try:
-        import yaml  # type: ignore
-
+        # yaml already imported at module level
         # Resolve the bundled plugins dir from this file's location so the
         # injector works regardless of CWD.
         repo_root = Path(__file__).resolve().parents[1]
@@ -5546,7 +5575,7 @@ def _inject_platform_plugin_env_vars() -> None:
             try:
                 with open(manifest_path, "r", encoding="utf-8") as f:
                     manifest = yaml.safe_load(f) or {}
-            except Exception:
+            except (yaml.YAMLError, OSError):
                 continue
             label = manifest.get("label") or manifest.get("name") or child.name
             # Merge required + optional env var declarations.
@@ -5582,7 +5611,7 @@ def _inject_platform_plugin_env_vars() -> None:
                     "password": is_secret,
                     "category": meta.get("category") or "messaging",
                 }
-    except Exception:
+    except (yaml.YAMLError, OSError):
         pass
 
 

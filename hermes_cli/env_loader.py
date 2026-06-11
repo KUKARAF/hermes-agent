@@ -4,10 +4,35 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 from dotenv import load_dotenv
 from utils import atomic_replace
+
+try:
+    from hermes_cli.config import _sanitize_env_lines as _hermes_sanitize_env_lines
+    _HAS_HERMES_CONFIG = True
+except ImportError:
+    _HAS_HERMES_CONFIG = False
+
+try:
+    import yaml as _yaml
+    _HAS_YAML = True
+except ImportError:
+    _HAS_YAML = False
+
+try:
+    from agent.secret_sources.bitwarden import apply_bitwarden_secrets as _apply_bitwarden_secrets
+    _HAS_BITWARDEN = True
+except ImportError:
+    _HAS_BITWARDEN = False
+
+try:
+    from agent.secret_sources.online_kv import apply_online_kv_secrets as _apply_online_kv_secrets
+    _HAS_ONLINE_KV = True
+except ImportError:
+    _HAS_ONLINE_KV = False
 
 
 # Env var name suffixes that indicate credential values.  These are the
@@ -146,18 +171,15 @@ def _sanitize_env_file_if_needed(path: Path) -> None:
     """
     if not path.exists():
         return
-    try:
-        from hermes_cli.config import _sanitize_env_lines
-    except ImportError:
+    if not _HAS_HERMES_CONFIG:
         return  # early bootstrap — config module not available yet
 
     read_kw = {"encoding": "utf-8-sig", "errors": "replace"}
     try:
         with open(path, **read_kw) as f:
             original = f.readlines()
-        sanitized = _sanitize_env_lines(original)
+        sanitized = _hermes_sanitize_env_lines(original)
         if sanitized != original:
-            import tempfile
             fd, tmp = tempfile.mkstemp(
                 dir=str(path.parent), suffix=".tmp", prefix=".env_"
             )
@@ -167,13 +189,13 @@ def _sanitize_env_file_if_needed(path: Path) -> None:
                     f.flush()
                     os.fsync(f.fileno())
                 atomic_replace(tmp, path)
-            except BaseException:
+            except (OSError, IOError):
                 try:
                     os.unlink(tmp)
                 except OSError:
                     pass
                 raise
-    except Exception:
+    except (OSError, IOError, UnicodeDecodeError, ValueError):
         pass  # best-effort — don't block gateway startup
 
 
@@ -225,19 +247,17 @@ def _apply_external_secret_sources(home_path: Path) -> None:
     """
     try:
         cfg = _load_secrets_config(home_path)
-    except Exception:  # noqa: BLE001 — config errors must not block startup
+    except (ValueError, KeyError, TypeError, AttributeError, OSError):
         return
 
     bw_cfg = (cfg or {}).get("bitwarden") or {}
     if not bw_cfg.get("enabled"):
         return
 
-    try:
-        from agent.secret_sources.bitwarden import apply_bitwarden_secrets
-    except ImportError:
+    if not _HAS_BITWARDEN:
         return
 
-    result = apply_bitwarden_secrets(
+    result = _apply_bitwarden_secrets(
         enabled=True,
         access_token_env=bw_cfg.get("access_token_env", "BWS_ACCESS_TOKEN"),
         project_id=bw_cfg.get("project_id", ""),
@@ -278,13 +298,11 @@ def _apply_external_secret_sources(home_path: Path) -> None:
     online_kv_cfg = (cfg or {}).get("online_kv") or {}
     if not online_kv_cfg.get("enabled"):
         return
-    try:
-        from agent.secret_sources.online_kv import apply_online_kv_secrets
-    except ImportError:
+    if not _HAS_ONLINE_KV:
         return
-    result = apply_online_kv_secrets(
+    result = _apply_online_kv_secrets(
         enabled=True,
-        token_env=online_kv_cfg.get("token_env", "KV_TOKEN"),
+        notify_chat_id=online_kv_cfg.get("notify_chat_id"),
         keys=online_kv_cfg.get("keys"),
         override_existing=bool(online_kv_cfg.get("override_existing", False)),
         cache_ttl_seconds=float(online_kv_cfg.get("cache_ttl_seconds", 300)),
@@ -307,13 +325,11 @@ def _load_secrets_config(home_path: Path) -> dict:
     config_path = home_path / "config.yaml"
     if not config_path.exists():
         return {}
-    try:
-        import yaml  # type: ignore
-    except ImportError:
+    if not _HAS_YAML:
         return {}
     try:
         with open(config_path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-    except Exception:  # noqa: BLE001
+            data = _yaml.safe_load(f) or {}
+    except (_yaml.YAMLError, OSError, ValueError):
         return {}
     return data.get("secrets") or {}
