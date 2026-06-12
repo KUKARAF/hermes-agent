@@ -4470,7 +4470,7 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
                     user_config.pop("max_turns", None)
 
                 config = _deep_merge(config, user_config)
-            except (ValueError, TypeError, AttributeError) as e:
+            except (ValueError, TypeError, AttributeError, yaml.YAMLError) as e:
                 _warn_config_parse_failure(config_path, e)
 
         normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
