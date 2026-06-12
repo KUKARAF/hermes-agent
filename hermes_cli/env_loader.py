@@ -297,7 +297,7 @@ def _apply_external_secret_sources(home_path: Path) -> None:
     # --- online_kv ---
     online_kv_cfg = (cfg or {}).get("online_kv") or {}
     if not online_kv_cfg.get("enabled"):
-        return
+        return  # nothing to do; Bitwarden section already ran above
     if not _HAS_ONLINE_KV:
         return
     result = _apply_online_kv_secrets(

@@ -480,7 +480,7 @@ def test_env_loader_calls_bsm_when_enabled(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(
-        "agent.secret_sources.bitwarden.apply_bitwarden_secrets",
+        "hermes_cli.env_loader._apply_bitwarden_secrets",
         fake_apply,
     )
 

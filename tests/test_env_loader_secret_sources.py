@@ -87,11 +87,8 @@ def test_apply_external_secret_sources_records_bitwarden_origin(tmp_path, monkey
     def _fake_apply(**_kwargs):
         return fake_result
 
-    # The import inside _apply_external_secret_sources is lazy, so we
-    # patch the *module attribute* it will pull in.
-    import agent.secret_sources.bitwarden as bw_module
-
-    monkeypatch.setattr(bw_module, "apply_bitwarden_secrets", _fake_apply)
+    # Patch the name that env_loader actually uses at call time.
+    monkeypatch.setattr(env_loader, "_apply_bitwarden_secrets", _fake_apply)
 
     env_loader._apply_external_secret_sources(tmp_path)
 
