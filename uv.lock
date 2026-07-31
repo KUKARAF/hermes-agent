@@ -1886,7 +1886,7 @@ requires-dist = [
     { name = "mcp", marker = "extra == 'mcp'", specifier = "==1.26.0" },
     { name = "modal", marker = "extra == 'modal'", specifier = "==1.3.4" },
     { name = "numpy", marker = "extra == 'voice'", specifier = "==2.4.3" },
-    { name = "online-pykv", git = "https://github.com/KUKARAF/online_pykv.git?rev=92c828017efa95eaf9c6c45b13eda1e495a7fd47" },
+    { name = "online-pykv", git = "https://github.com/KUKARAF/online_pykv.git?rev=dc535f7a0277b58407e63eed51cca538b7b92998" },
     { name = "openai", specifier = "==2.24.0" },
     { name = "parallel-web", marker = "extra == 'parallel-web'", specifier = "==0.4.2" },
     { name = "prompt-toolkit", specifier = "==3.0.52" },
@@ -2834,7 +2834,7 @@ wheels = [
 [[package]]
 name = "online-pykv"
 version = "0.1.0"
-source = { git = "https://github.com/KUKARAF/online_pykv.git?rev=92c828017efa95eaf9c6c45b13eda1e495a7fd47#92c828017efa95eaf9c6c45b13eda1e495a7fd47" }
+source = { git = "https://github.com/KUKARAF/online_pykv.git?rev=dc535f7a0277b58407e63eed51cca538b7b92998#dc535f7a0277b58407e63eed51cca538b7b92998" }
 dependencies = [
     { name = "qrcode" },
     { name = "tomli-w" },
