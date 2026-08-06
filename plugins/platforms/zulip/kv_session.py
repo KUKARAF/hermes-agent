@@ -125,6 +125,7 @@ async def request_kv_session_via_zulip(
             poll_interval=poll_interval,
             timeout=timeout,
             save_to_config=save_to_config,
+            poll_secret=result.get("poll_secret"),
         ),
     )
     return token

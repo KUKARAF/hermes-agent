@@ -271,4 +271,4 @@ select = ["PLW1514"]
 "plugins/**" = ["PLW1514"]
 
 [tool.uv.sources]
-online-pykv = { git = "https://github.com/KUKARAF/online_pykv.git", rev = "dc535f7a0277b58407e63eed51cca538b7b92998" }
+online-pykv = { git = "https://github.com/KUKARAF/online_pykv.git", rev = "0415e5f2b9b148e2ef25c7605e5e029f20f724e4" }
