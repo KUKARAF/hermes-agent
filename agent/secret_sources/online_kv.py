@@ -166,13 +166,17 @@ def apply_online_kv_secrets(
         label="hermes-agent",
     )
 
+    # OSError covers raw network failures (urllib.error.URLError et al.) that
+    # online_pykv does not wrap in KVError; ValueError covers a malformed
+    # ~/.config/kv/config.toml (TOMLDecodeError).  Secret sources must never
+    # block startup — an unreachable KV host degrades to warnings.
     try:
         client = KVClient(
             on_auth_error=on_auth_error,
             request_label="hermes-agent",
             request_show_qr=False,  # URL goes to Zulip, not terminal
         )
-    except KVError as exc:
+    except (KVError, OSError, ValueError) as exc:
         result.error = str(exc)
         return result
 
@@ -184,7 +188,7 @@ def apply_online_kv_secrets(
             continue
         try:
             value = client.get_or_default(key, default="")
-        except KVError as exc:
+        except (KVError, OSError, ValueError) as exc:
             result.warnings.append(f"Error fetching {key!r}: {exc}")
             continue
         result.secrets[key] = value

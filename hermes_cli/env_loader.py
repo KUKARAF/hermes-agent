@@ -309,6 +309,8 @@ def _apply_external_secret_sources(home_path: Path) -> None:
         print(f"  online_kv: applied {len(result.applied)} secret(s)", file=sys.stderr)
     if result.error:
         print(f"  online_kv: {result.error}", file=sys.stderr)
+    for warn in result.warnings:
+        print(f"  online_kv: {warn}", file=sys.stderr)
 
 
 def _load_secrets_config(home_path: Path) -> dict:
