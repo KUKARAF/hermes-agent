@@ -1,10 +1,46 @@
-.DS_Store
-/venv/
-/_pycache/
-*.pyc*
+# ============================================================
+# Python
+# ============================================================
 __pycache__/
+*.py[cod]
+*$py.class
 .venv/
-.vscode/
+venv/
+build/
+# Anchored: plugins/*/dashboard/dist bundles are tracked
+/dist/
+*.egg-info/
+.eggs/
+
+# Test / lint caches and coverage
+.pytest_cache/
+.pytest-cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# ============================================================
+# Node / npm (root, web/, ui-tui/, website/ have their own too)
+# ============================================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ============================================================
+# Nix / dev shell
+# ============================================================
+.direnv/
+.nix-stamps/
+result
+result-*
+
+# ============================================================
+# Environment / secrets
+# ============================================================
 .env
 .env.local
 .env.development.local
@@ -12,65 +48,84 @@ __pycache__/
 .env.production.local
 .env.development
 .env.test
-export*
-__pycache__/model_tools.cpython-310.pyc
-__pycache__/web_tools.cpython-310.pyc
-logs/
-data/
-.pytest_cache/
-.pytest-cache/
-tmp/
-temp_vision_images/
-hermes-*/*
-examples/
-tests/quick_test_dataset.jsonl
-tests/sample_dataset.jsonl
-run_datagen_kimik2-thinking.sh
-run_datagen_megascience_glm4-6.sh
-run_datagen_sonnet.sh
-source-data/*
-run_datagen_megascience_glm4-6.sh
-data/*
-node_modules/
-browser-use/
-agent-browser/
+
 # Private keys
 *.ppk
 *.pem
 privvy*
-images/
-__pycache__/
-hermes_agent.egg-info/
-wandb/
-testlogs
 
 # CLI config (may contain sensitive SSH paths)
 cli-config.yaml
 
-# Skills Hub state (lives in ~/.hermes/skills/.hub/ at runtime, but just in case)
-skills/.hub/
-ignored/
-.worktrees/
-environments/benchmarks/evals/
+# ============================================================
+# Editor / OS
+# ============================================================
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*~
 
-# Web UI build output
+# ============================================================
+# Project-specific build outputs
+# ============================================================
+# Web UI build output (bundled into the wheel at build time)
 hermes_cli/web_dist/
+# TUI bundle output
+hermes_cli/tui_dist/*
+hermes_cli/scripts/
 
 # Web UI assets — synced from @nous-research/ui at build time via
 # `npm run sync-assets` (see web/package.json).
 web/public/fonts/
 web/public/ds-assets/
 
+# Generated skills index (scripts/build_skills_index.py)
+website/static/api/skills-index.json
+
+# Generated docs
+docs/superpowers/*
+
 # Release script temp files
 .release_notes.md
-mini-swe-agent/
 
-# Nix
-.direnv/
-.nix-stamps/
-result
-website/static/api/skills-index.json
+# ============================================================
+# Project-specific runtime / working state
+# ============================================================
+logs/
+# Anchored: website/src/data is tracked
+/data/
+tmp/
+temp_vision_images/
+images/
+testlogs
+wandb/
+# Anchored: skills/creative/p5js has tracked export-* files
+/export*
+# Anchored: optional-skills/**/examples/ are tracked
+/examples/
+ignored/
+.worktrees/
+environments/benchmarks/evals/
+
+# Skills Hub state (lives in ~/.hermes/skills/.hub/ at runtime, but just in case)
+skills/.hub/
+
+# ============================================================
+# Local checkouts of sibling/vendor repos
+# ============================================================
+hermes-*/*
+browser-use/
+agent-browser/
+mini-swe-agent/
 models-dev-upstream/
-hermes_cli/tui_dist/*
-hermes_cli/scripts/
-docs/superpowers/*
+
+# ============================================================
+# Legacy data-generation artifacts
+# ============================================================
+source-data/*
+tests/quick_test_dataset.jsonl
+tests/sample_dataset.jsonl
+run_datagen_kimik2-thinking.sh
+run_datagen_megascience_glm4-6.sh
+run_datagen_sonnet.sh
