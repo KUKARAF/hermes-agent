@@ -702,6 +702,27 @@ def resolve_provider_full(
     if custom_pdef is not None:
         return custom_pdef
 
+    # 2c. Provider profile plugins (bundled + $HERMES_HOME/plugins/model-providers).
+    # The runtime/auth layers already auto-wire from this registry; without this
+    # step a plugin-registered provider works via `--provider` on the CLI but
+    # the in-chat /model switch rejects it as unknown.
+    try:
+        from providers import get_provider_profile as _plugin_profile
+        prof = _plugin_profile(canonical) or _plugin_profile(name.strip().lower())
+    except Exception:
+        prof = None
+    if prof is not None:
+        _api_mode_to_transport = {v: k for k, v in TRANSPORT_TO_API_MODE.items()}
+        return ProviderDef(
+            id=prof.name,
+            name=prof.display_name or prof.name,
+            transport=_api_mode_to_transport.get(prof.api_mode, "openai_chat"),
+            api_key_env_vars=tuple(prof.env_vars),
+            base_url=prof.base_url,
+            auth_type=prof.auth_type,
+            source="plugin",
+        )
+
     # 3. Try models.dev directly (for providers not in our ALIASES)
     try:
         from agent.models_dev import get_provider_info as _mdev_provider
