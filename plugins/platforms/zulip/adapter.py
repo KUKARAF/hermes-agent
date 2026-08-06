@@ -15,10 +15,21 @@ Configuration in config.yaml::
             bot_email: bot@osmosis.zulipchat.com
             api_key: ZULIP_API_KEY   # KV key — resolved at config load time
             require_mention: true    # only respond when @mentioned in streams
+            channels:                # always respond here, mention or not
+            - Bigboy/general         # "Stream" (all topics) or "Stream/topic"
+            mention_aliases:         # plain-text names that count as a mention
+            - bigboy                 # "@bigboy" triggers even if the bot's
+                                     # Zulip display name differs
 
 Or via environment variables (overrides config.yaml):
     ZULIP_SERVER_URL, ZULIP_BOT_EMAIL, ZULIP_API_KEY,
-    ZULIP_REQUIRE_MENTION, ZULIP_ALLOWED_USERS, ZULIP_ALLOW_ALL_USERS
+    ZULIP_REQUIRE_MENTION, ZULIP_ALLOWED_USERS, ZULIP_ALLOW_ALL_USERS,
+    ZULIP_LISTEN_CHANNELS, ZULIP_MENTION_ALIASES (comma-separated)
+
+Note: Zulip only delivers stream messages to bots for streams the bot is
+SUBSCRIBED to. On connect the adapter auto-subscribes to configured
+``channels`` where possible; private channels require a member to add the
+bot via the Zulip UI first — a warning is logged when that is needed.
 """
 
 import asyncio
@@ -95,6 +106,44 @@ class ZulipAdapter(BasePlatformAdapter):
             u.strip().lower() for u in raw_allowed.split(",") if u.strip()
         }
 
+        # Channels where the bot always responds, mention or not.  Entries are
+        # "Stream" (every topic) or "Stream/topic", case-insensitive.  Parsed
+        # into {stream_lower: set(topic_lower) | None}; None = all topics.
+        chans_env = os.getenv("ZULIP_LISTEN_CHANNELS", "")
+        chans_extra = extra.get("channels") or extra.get("listen_channels") or []
+        raw_channels = (
+            [c.strip() for c in chans_env.split(",")] if chans_env
+            else (chans_extra if isinstance(chans_extra, list) else [chans_extra])
+        )
+        self._listen_channels: Dict[str, Optional[set]] = {}
+        for entry in raw_channels:
+            entry = str(entry).strip()
+            if not entry:
+                continue
+            stream, _, chan_topic = entry.partition("/")
+            stream = stream.strip().lower()
+            chan_topic = chan_topic.strip().lower()
+            if not stream:
+                continue
+            if not chan_topic:
+                self._listen_channels[stream] = None
+            elif self._listen_channels.get(stream, set()) is not None:
+                self._listen_channels.setdefault(stream, set()).add(chan_topic)
+
+        # Plain-text names that count as a mention (e.g. "@bigboy") even when
+        # they don't match the bot's Zulip display name, so no server-side
+        # "mentioned" flag is set.
+        aliases_env = os.getenv("ZULIP_MENTION_ALIASES", "")
+        aliases_extra = extra.get("mention_aliases") or []
+        raw_aliases = (
+            [a.strip() for a in aliases_env.split(",")] if aliases_env
+            else (aliases_extra if isinstance(aliases_extra, list) else [aliases_extra])
+        )
+        self._alias_res = [
+            re.compile(rf"@_?\*{{0,2}}{re.escape(str(a).strip())}\b", re.IGNORECASE)
+            for a in raw_aliases if str(a).strip()
+        ]
+
         # Runtime state
         self._queue_id: Optional[str] = None
         self._last_event_id: int = -1
@@ -145,6 +194,8 @@ class ZulipAdapter(BasePlatformAdapter):
 
         self._queue_id = data["queue_id"]
         self._last_event_id = data.get("last_event_id", -1)
+
+        await self._ensure_subscriptions()
 
         self._poll_task = asyncio.create_task(self._poll_loop())
         self._mark_connected()
@@ -247,6 +298,56 @@ class ZulipAdapter(BasePlatformAdapter):
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
 
+    def _in_listen_channel(self, stream_name: Any, topic: str) -> bool:
+        """True when a stream/topic matches a configured always-respond channel."""
+        if not self._listen_channels or not isinstance(stream_name, str):
+            return False
+        topics = self._listen_channels.get(stream_name.strip().lower(), False)
+        if topics is False:
+            return False
+        return topics is None or topic.strip().lower() in topics
+
+    async def _ensure_subscriptions(self) -> None:
+        """Subscribe to configured channels; warn where Zulip denies access.
+
+        Zulip only delivers stream events to bots for streams they are
+        subscribed to, so a configured channel the bot cannot join (e.g. a
+        private channel it hasn't been added to) would otherwise fail silently.
+        """
+        if not self._listen_channels:
+            return
+        try:
+            resp = await self._client.get(self._api("users/me/subscriptions"))
+            resp.raise_for_status()
+            subscribed = {
+                s.get("name", "").strip().lower()
+                for s in resp.json().get("subscriptions", [])
+            }
+        except (httpx.HTTPError, httpx.RequestError, OSError, ValueError) as e:
+            logger.warning("Zulip: could not list subscriptions: %s", e)
+            return
+
+        for stream in self._listen_channels:
+            if stream in subscribed:
+                continue
+            try:
+                resp = await self._client.post(
+                    self._api("users/me/subscriptions"),
+                    data={"subscriptions": f'[{{"name": "{stream}"}}]'},
+                )
+                body = resp.json()
+                if resp.status_code == 200 and body.get("result") == "success":
+                    logger.info("Zulip: subscribed to channel %r", stream)
+                else:
+                    logger.warning(
+                        "Zulip: cannot subscribe to channel %r (%s) — if it is a "
+                        "private channel, add the bot to it in the Zulip UI or "
+                        "no messages from it will be received",
+                        stream, body.get("msg", resp.status_code),
+                    )
+            except (httpx.HTTPError, httpx.RequestError, OSError, ValueError) as e:
+                logger.warning("Zulip: subscribe to %r failed: %s", stream, e)
+
     # ── Attachment extraction ─────────────────────────────────────────────
 
     async def _extract_attachments(self, text: str):
@@ -307,16 +408,21 @@ class ZulipAdapter(BasePlatformAdapter):
 
         is_dm = msg["type"] == "private"
 
-        text_content = msg.get("content", "")
+        raw_content = msg.get("content", "")
         # Strip Zulip @mention markup (@**Name** / @_**Name**) so that
         # "@**Hermes Bot** /help" becomes "/help" before any routing logic.
-        text_content = re.sub(r'@_?\*{2}[^*]+\*{2}', '', text_content).strip()
+        text_content = re.sub(r'@_?\*{2}[^*]+\*{2}', '', raw_content).strip()
 
         is_slash_command = text_content.startswith("/")
 
         if not is_dm and self.require_mention and not is_slash_command:
             flags = event.get("flags", [])
-            if "mentioned" not in flags and "wildcard_mentioned" not in flags:
+            mentioned = "mentioned" in flags or "wildcard_mentioned" in flags
+            if not mentioned:
+                mentioned = any(r.search(raw_content) for r in self._alias_res)
+            if not mentioned and not self._in_listen_channel(
+                msg.get("display_recipient", ""), msg.get("subject", "")
+            ):
                 return
 
         if self._allowed_users and sender_email.lower() not in self._allowed_users:
@@ -507,6 +613,14 @@ def _env_enablement() -> dict | None:
     allowed = os.getenv("ZULIP_ALLOWED_USERS", "").strip()
     if allowed:
         seed["allowed_users"] = allowed
+
+    channels = os.getenv("ZULIP_LISTEN_CHANNELS", "").strip()
+    if channels:
+        seed["channels"] = [c.strip() for c in channels.split(",") if c.strip()]
+
+    aliases = os.getenv("ZULIP_MENTION_ALIASES", "").strip()
+    if aliases:
+        seed["mention_aliases"] = [a.strip() for a in aliases.split(",") if a.strip()]
 
     home = os.getenv("ZULIP_HOME_CHANNEL", "").strip()
     if home:
