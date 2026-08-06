@@ -12,6 +12,7 @@ on:
       - '.github/workflows/docker-ghcr.yml'
   release:
     types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: read
