@@ -763,7 +763,15 @@ def load_gateway_config() -> GatewayConfig:
 
             # Merge platforms section from config.yaml into gw_data so that
             # nested keys like platforms.webhook.extra.routes are loaded.
+            # Platforms may live at the top level or (as hermes writes them)
+            # nested under ``gateway:`` — mirror the streaming lookup above and
+            # accept both, so gateway.platforms.<x>.extra is actually loaded
+            # instead of silently ignored (which left plugin platforms like
+            # zulip configured only by the env-enablement seed, discarding
+            # require_mention / channels / allowed_users).
             yaml_platforms = yaml_cfg.get("platforms")
+            if not isinstance(yaml_platforms, dict):
+                yaml_platforms = yaml_cfg.get("gateway", {}).get("platforms")
             platforms_data = gw_data.setdefault("platforms", {})
             if not isinstance(platforms_data, dict):
                 platforms_data = {}
