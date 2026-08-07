@@ -11,18 +11,16 @@ Configuration in config.yaml::
         zulip:
           enabled: true
           extra:
-            server_url: https://osmosis.zulipchat.com
-            bot_email: bot@osmosis.zulipchat.com
-            api_key: ZULIP_API_KEY   # KV key — resolved at config load time
             require_mention: true    # only respond when @mentioned in streams
             channels:                # always respond here, mention or not
             - Bigboy/general         # "Stream" (all topics) or "Stream/topic"
-            mention_aliases:         # plain-text names that count as a mention
-            - bigboy                 # "@bigboy" triggers even if the bot's
-                                     # Zulip display name differs
+
+The bot identity (site URL, email, API key) and its display NAME are NOT
+hermes settings — the name is configured in Zulip on the bot account, and the
+three connection values come from the environment / online_kv (below).
 
 Or via environment variables (overrides config.yaml):
-    ZULIP_SERVER_URL, ZULIP_BOT_EMAIL, ZULIP_API_KEY,
+    ZULIP_SITE_URL (alias: ZULIP_SERVER_URL), ZULIP_BOT_EMAIL, ZULIP_API_KEY,
     ZULIP_REQUIRE_MENTION, ZULIP_ALLOWED_USERS, ZULIP_ALLOW_ALL_USERS,
     ZULIP_LISTEN_CHANNELS, ZULIP_MENTION_ALIASES (comma-separated)
 
@@ -72,6 +70,15 @@ _EXT_TO_MIME: Dict[str, str] = {
     ".wav": "audio/wav", ".opus": "audio/opus",
 }
 
+
+def _zulip_site_url() -> str:
+    """Resolve the Zulip site URL from the environment.
+
+    Prefers ``ZULIP_SITE_URL`` (Zulip's own zuliprc convention, and the key
+    name used in online_kv) with ``ZULIP_SERVER_URL`` as a back-compat alias.
+    """
+    return (os.getenv("ZULIP_SITE_URL") or os.getenv("ZULIP_SERVER_URL") or "").strip()
+
 # ---------------------------------------------------------------------------
 # Adapter
 # ---------------------------------------------------------------------------
@@ -86,7 +93,9 @@ class ZulipAdapter(BasePlatformAdapter):
         extra = getattr(config, "extra", {}) or {}
 
         self.server_url = (
-            os.getenv("ZULIP_SERVER_URL") or extra.get("server_url", "")
+            _zulip_site_url()
+            or extra.get("site_url", "")
+            or extra.get("server_url", "")
         ).rstrip("/")
         self.bot_email = os.getenv("ZULIP_BOT_EMAIL") or extra.get("bot_email", "")
         self.api_key = os.getenv("ZULIP_API_KEY") or extra.get("api_key", "")
@@ -574,7 +583,7 @@ class ZulipAdapter(BasePlatformAdapter):
 
 def check_requirements() -> bool:
     return bool(
-        os.getenv("ZULIP_SERVER_URL")
+        _zulip_site_url()
         and os.getenv("ZULIP_BOT_EMAIL")
         and os.getenv("ZULIP_API_KEY")
     )
@@ -582,7 +591,9 @@ def check_requirements() -> bool:
 
 def validate_config(config) -> bool:
     extra = getattr(config, "extra", {}) or {}
-    server_url = os.getenv("ZULIP_SERVER_URL") or extra.get("server_url", "")
+    server_url = (
+        _zulip_site_url() or extra.get("site_url", "") or extra.get("server_url", "")
+    )
     bot_email = os.getenv("ZULIP_BOT_EMAIL") or extra.get("bot_email", "")
     api_key = os.getenv("ZULIP_API_KEY") or extra.get("api_key", "")
     return bool(server_url and bot_email and api_key)
@@ -594,7 +605,7 @@ def is_connected(config) -> bool:
 
 def _env_enablement() -> dict | None:
     """Seed PlatformConfig.extra from env vars during gateway config load."""
-    server_url = os.getenv("ZULIP_SERVER_URL", "").strip()
+    server_url = _zulip_site_url()
     bot_email = os.getenv("ZULIP_BOT_EMAIL", "").strip()
     api_key = os.getenv("ZULIP_API_KEY", "").strip()
     if not (server_url and bot_email and api_key):
@@ -644,12 +655,14 @@ async def _standalone_send(
 ) -> Dict[str, Any]:
     """Out-of-process send for cron delivery (no running adapter required)."""
     extra = getattr(pconfig, "extra", {}) or {}
-    server_url = (os.getenv("ZULIP_SERVER_URL") or extra.get("server_url", "")).rstrip("/")
+    server_url = (
+        _zulip_site_url() or extra.get("site_url", "") or extra.get("server_url", "")
+    ).rstrip("/")
     bot_email = os.getenv("ZULIP_BOT_EMAIL") or extra.get("bot_email", "")
     api_key = os.getenv("ZULIP_API_KEY") or extra.get("api_key", "")
 
     if not (server_url and bot_email and api_key):
-        return {"error": "ZULIP_SERVER_URL, ZULIP_BOT_EMAIL, ZULIP_API_KEY must be set"}
+        return {"error": "ZULIP_SITE_URL, ZULIP_BOT_EMAIL, ZULIP_API_KEY must be set"}
 
     try:
         if chat_id.startswith("dm_"):
@@ -694,7 +707,7 @@ def register(ctx):
         validate_config=validate_config,
         is_connected=is_connected,
         env_enablement_fn=_env_enablement,
-        required_env=["ZULIP_SERVER_URL", "ZULIP_BOT_EMAIL", "ZULIP_API_KEY"],
+        required_env=["ZULIP_SITE_URL", "ZULIP_BOT_EMAIL", "ZULIP_API_KEY"],
         allowed_users_env="ZULIP_ALLOWED_USERS",
         allow_all_env="ZULIP_ALLOW_ALL_USERS",
         cron_deliver_env_var="ZULIP_HOME_CHANNEL",
