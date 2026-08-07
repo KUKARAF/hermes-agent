@@ -22,7 +22,7 @@ three connection values come from the environment / online_kv (below).
 Or via environment variables (overrides config.yaml):
     ZULIP_SITE_URL (alias: ZULIP_SERVER_URL), ZULIP_BOT_EMAIL, ZULIP_API_KEY,
     ZULIP_REQUIRE_MENTION, ZULIP_ALLOWED_USERS, ZULIP_ALLOW_ALL_USERS,
-    ZULIP_LISTEN_CHANNELS, ZULIP_MENTION_ALIASES (comma-separated)
+    ZULIP_LISTEN_CHANNELS (comma-separated)
 
 Note: Zulip only delivers stream messages to bots for streams the bot is
 SUBSCRIBED to. On connect the adapter auto-subscribes to configured
@@ -138,20 +138,6 @@ class ZulipAdapter(BasePlatformAdapter):
                 self._listen_channels[stream] = None
             elif self._listen_channels.get(stream, set()) is not None:
                 self._listen_channels.setdefault(stream, set()).add(chan_topic)
-
-        # Plain-text names that count as a mention (e.g. "@bigboy") even when
-        # they don't match the bot's Zulip display name, so no server-side
-        # "mentioned" flag is set.
-        aliases_env = os.getenv("ZULIP_MENTION_ALIASES", "")
-        aliases_extra = extra.get("mention_aliases") or []
-        raw_aliases = (
-            [a.strip() for a in aliases_env.split(",")] if aliases_env
-            else (aliases_extra if isinstance(aliases_extra, list) else [aliases_extra])
-        )
-        self._alias_res = [
-            re.compile(rf"@_?\*{{0,2}}{re.escape(str(a).strip())}\b", re.IGNORECASE)
-            for a in raw_aliases if str(a).strip()
-        ]
 
         # Runtime state
         self._queue_id: Optional[str] = None
@@ -427,8 +413,6 @@ class ZulipAdapter(BasePlatformAdapter):
         if not is_dm and self.require_mention and not is_slash_command:
             flags = event.get("flags", [])
             mentioned = "mentioned" in flags or "wildcard_mentioned" in flags
-            if not mentioned:
-                mentioned = any(r.search(raw_content) for r in self._alias_res)
             if not mentioned and not self._in_listen_channel(
                 msg.get("display_recipient", ""), msg.get("subject", "")
             ):
@@ -628,10 +612,6 @@ def _env_enablement() -> dict | None:
     channels = os.getenv("ZULIP_LISTEN_CHANNELS", "").strip()
     if channels:
         seed["channels"] = [c.strip() for c in channels.split(",") if c.strip()]
-
-    aliases = os.getenv("ZULIP_MENTION_ALIASES", "").strip()
-    if aliases:
-        seed["mention_aliases"] = [a.strip() for a in aliases.split(",") if a.strip()]
 
     home = os.getenv("ZULIP_HOME_CHANNEL", "").strip()
     if home:

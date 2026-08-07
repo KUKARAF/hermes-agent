@@ -148,19 +148,18 @@ def apply_online_kv_secrets(
 
     secret_keys = keys or _DEFAULT_KEYS
 
-    # Check for ZULIP_API_KEY before attempting anything — it is required
-    # for the session-approval flow.  Fail fast with a clear message.
-    if not os.getenv("ZULIP_API_KEY", "").strip():
-        result.error = (
-            "ZULIP_API_KEY is not set in the environment.  "
-            "This is required for the online_kv session-approval flow.  "
-            "Set it in ~/.hermes/.env before enabling online_kv."
-        )
-        return result
-
-    # Build the auth error handler (Zulip approval link).
-    # If ZULIP_API_KEY is missing, this returns None — the caller (below)
-    # will raise AuthError immediately since there's no recovery path.
+    # Build the auth error handler for the Zulip approval-link flow.  It only
+    # works when ZULIP_API_KEY is already in the environment (needed to send
+    # the link via Zulip); otherwise this returns None and online_pykv falls
+    # back to printing the approval URL to stderr / the dashboard.
+    #
+    # We deliberately do NOT hard-require ZULIP_API_KEY here.  A valid saved
+    # session token (~/.config/kv/config.toml) authenticates KV without any
+    # approval step, so requiring the key up front would break the common
+    # "all secrets in KV, empty .env" deployment (the key itself lives in KV).
+    # If there is no token AND no handler, KVClient() raises AuthError — a
+    # KVError subclass caught below — which degrades to a warning rather than
+    # blocking startup.
     on_auth_error: Optional[Callable[[], str]] = _build_auth_error_handler(
         notify_chat_id=notify_chat_id,
         label="hermes-agent",
