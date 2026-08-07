@@ -3725,7 +3725,18 @@ class GatewayRunner:
             )
         except Exception:
             pass
-        _any_allowlist = any(
+        # Config-declared allowlists (gateway.platforms.<p>.extra.allowed_users)
+        # count too — _is_user_authorized honors them, so the warning must not
+        # claim "no allowlists" when config has one.
+        _any_config_allowlist = False
+        try:
+            for _pc in self.config.platforms.values():
+                if (getattr(_pc, "extra", None) or {}).get("allowed_users"):
+                    _any_config_allowlist = True
+                    break
+        except (AttributeError, TypeError):
+            pass
+        _any_allowlist = _any_config_allowlist or any(
             os.getenv(v) for v in _builtin_allowed_vars + _plugin_allowed_vars
         )
         _allow_all = os.getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"} or any(
