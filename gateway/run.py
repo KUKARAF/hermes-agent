@@ -6233,6 +6233,26 @@ class GatewayRunner:
 
         # Check platform-specific and global allowlists
         platform_allowlist = os.getenv(platform_env_map.get(source.platform, ""), "").strip()
+
+        # Also honor the platform's config.yaml allowlist
+        # (gateway.platforms.<platform>.extra.allowed_users).  The env-var
+        # allowlists above are a legacy artifact — config is the more natural
+        # home, so merge any config-declared users into the platform allowlist.
+        # A user permitted by either source passes; this also means a config
+        # allowlist alone is enough to avoid the default-deny below.
+        try:
+            _pconf = self.config.platforms.get(source.platform)
+            _cfg_allowed = (getattr(_pconf, "extra", None) or {}).get("allowed_users", "") if _pconf else ""
+            if isinstance(_cfg_allowed, (list, tuple)):
+                _cfg_allowed = ",".join(str(u) for u in _cfg_allowed)
+            _cfg_allowed = str(_cfg_allowed).strip()
+            if _cfg_allowed:
+                platform_allowlist = (
+                    f"{platform_allowlist},{_cfg_allowed}" if platform_allowlist else _cfg_allowed
+                )
+        except (AttributeError, KeyError, TypeError):
+            pass
+
         group_user_allowlist = ""
         group_chat_allowlist = ""
         if source.chat_type in {"group", "forum"}:
