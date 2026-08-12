@@ -255,36 +255,73 @@ async def _fetch_seasonal() -> Dict[str, Any]:
 
 
 async def _async_produce_in_season(
-    country: Optional[str] = None, month: Optional[str] = None
+    country: Optional[str] = None,
+    month: Optional[str] = None,
+    include_imported: bool = False,
 ) -> Dict[str, Any]:
+    """Produce in season now, split by how "seasonal" it really is.
+
+    Home country = ``country`` arg, else config ``kitchenowl.produce_country``.
+    For each item grown in that country we look at *which* months it appears:
+      - ``seasonal``   — in season THIS month and only part of the year (the
+        genuinely-in-season list; this is the default/headline result).
+      - ``year_round`` — appears every month locally (greenhouse + cold storage
+        filling the gap; EUFIC counts these as "available", not seasonal).
+    ``imported`` (only when requested) — in season somewhere else in Europe this
+    month but NOT grown locally at all, with the source countries.
+    With no home country resolved, everything in season now lands in ``seasonal``.
+    """
     data = await _fetch_seasonal()
-
+    section = _config_section()
+    local_country = (country or str(section.get("produce_country", "") or "")).strip()
+    lc = local_country.lower()
     target_month = (month or datetime.now().strftime("%B")).strip().lower()
-    target_country = country.strip().lower() if country else None
 
-    out: Dict[str, list] = {}
+    seasonal: Dict[str, list] = {}
+    year_round: Dict[str, list] = {}
+    imported: Dict[str, list] = {}
     for category, produce in data.items():
-        names = set()
+        cat = category.strip().lower()
+        seas, yr, imp = set(), set(), []
         for name, pairs in (produce or {}).items():
-            for entry in pairs:
-                if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+            local_months, elsewhere_now = set(), set()
+            for e in pairs:
+                if not isinstance(e, (list, tuple)) or len(e) < 2:
                     continue
-                mo = str(entry[0]).strip().lower()
-                co = str(entry[1]).strip().lower()
-                if mo != target_month:
-                    continue
-                if target_country and co != target_country:
-                    continue
-                names.add(str(name).strip())
-                break
-        out[category.strip().lower()] = sorted(names)
+                mo = str(e[0]).strip().lower()
+                co = str(e[1]).strip()
+                if lc and co.lower() == lc:
+                    local_months.add(mo)
+                if mo == target_month and co.lower() != lc:
+                    elsewhere_now.add(co)
+            nm = str(name).strip()
+            if not lc:
+                if any(str(e[0]).strip().lower() == target_month for e in pairs):
+                    seas.add(nm)
+            elif local_months:  # grown locally
+                if target_month in local_months:
+                    (yr if len(local_months) >= 12 else seas).add(nm)
+            elif include_imported and elsewhere_now:
+                imp.append({"name": nm, "countries": sorted(elsewhere_now)})
+        seasonal[cat] = sorted(seas)
+        if lc:
+            year_round[cat] = sorted(yr)
+        if include_imported:
+            imported[cat] = sorted(imp, key=lambda x: x["name"])
 
-    return {
+    result: Dict[str, Any] = {
         "month": (month or datetime.now().strftime("%B")).strip(),
-        "country": country.strip() if country else "any (Europe)",
-        "produce": out,
-        "count": sum(len(v) for v in out.values()),
+        "local_country": local_country or "any (Europe)",
+        "seasonal": seasonal,
+        "seasonal_count": sum(len(v) for v in seasonal.values()),
     }
+    if lc:
+        result["year_round"] = year_round
+        result["year_round_count"] = sum(len(v) for v in year_round.values())
+    if include_imported:
+        result["imported"] = imported
+        result["imported_count"] = sum(len(v) for v in imported.values())
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -373,9 +410,13 @@ def _handle_search_recipes(args: dict, **kw) -> str:
 
 
 def _handle_produce_in_season(args: dict, **kw) -> str:
+    inc = args.get("include_imported")
+    if isinstance(inc, str):
+        inc = inc.strip().lower() in ("true", "1", "yes")
+    inc = bool(inc)
     try:
         result = _run_async(
-            _async_produce_in_season(args.get("country"), args.get("month"))
+            _async_produce_in_season(args.get("country"), args.get("month"), inc)
         )
         return json.dumps({"result": result})
     except Exception as e:
@@ -513,11 +554,12 @@ KITCHENOWL_SEARCH_RECIPES_SCHEMA = {
 KITCHENOWL_PRODUCE_SCHEMA = {
     "name": "kitchenowl_produce_in_season",
     "description": (
-        "Get fruits and vegetables that are in season right now (European "
-        "seasonal produce). Useful for suggesting what to add to a shopping "
-        "list or which recipes to cook. Optionally pass a country for local "
-        "results (e.g. 'Spain', 'Poland'); otherwise returns produce in season "
-        "anywhere in Europe. Defaults to the current month."
+        "Get fruits and vegetables in season right now, grown locally (no "
+        "imports by default). Returns 'seasonal' (genuinely in season this "
+        "month) and 'year_round' (local greenhouse/storage staples available "
+        "all year). Use the 'seasonal' list for what's special right now — good "
+        "for suggesting shopping-list additions or recipes. Defaults to the "
+        "configured home country and the current month."
     ),
     "parameters": {
         "type": "object",
@@ -525,14 +567,22 @@ KITCHENOWL_PRODUCE_SCHEMA = {
             "country": {
                 "type": "string",
                 "description": (
-                    "Country to get local seasonal produce for (e.g. 'Spain', "
-                    "'Poland', 'Germany', 'Italy'). Omit for all of Europe."
+                    "Override the home country (e.g. 'Spain', 'Germany', "
+                    "'Italy'). Omit to use the configured default."
                 ),
             },
             "month": {
                 "type": "string",
                 "description": (
                     "Month name (e.g. 'August'). Omit to use the current month."
+                ),
+            },
+            "include_imported": {
+                "type": "boolean",
+                "description": (
+                    "Also return produce in season elsewhere in Europe this "
+                    "month but NOT grown locally (i.e. imported), with source "
+                    "countries. Default false."
                 ),
             },
         },
