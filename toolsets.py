@@ -63,6 +63,7 @@ _HERMES_CORE_TOOLS = [
     # KitchenOwl shopping lists + recipes (gated on KITCHENOWL_API_TOKEN via check_fn)
     "kitchenowl_list_lists", "kitchenowl_get_items", "kitchenowl_add_item",
     "kitchenowl_remove_item", "kitchenowl_search_recipes",
+    "kitchenowl_produce_in_season",
     # Kanban multi-agent coordination — only in schema when the agent is
     # spawned as a kanban worker (HERMES_KANBAN_TASK env set) or the current
     # profile explicitly enables the kanban toolset. Gated via check_fn in
@@ -243,13 +244,14 @@ TOOLSETS = {
     },
 
     "kitchenowl": {
-        "description": "KitchenOwl shopping lists and recipes",
+        "description": "KitchenOwl shopping lists, recipes, and seasonal produce",
         "tools": [
             "kitchenowl_list_lists",
             "kitchenowl_get_items",
             "kitchenowl_add_item",
             "kitchenowl_remove_item",
             "kitchenowl_search_recipes",
+            "kitchenowl_produce_in_season",
         ],
         "includes": []
     },

@@ -24,6 +24,9 @@ import asyncio
 import json
 import logging
 import os
+import re
+import time
+from datetime import datetime
 from typing import Any, Dict, Optional
 from urllib.parse import quote
 
@@ -39,6 +42,12 @@ _KITCHENOWL_TOKEN: str = ""
 
 _DEFAULT_URL = "https://app.kitchenowl.org"
 _DEFAULT_TOKEN_KV = "KITCHENOWL_API_TOKEN"
+
+# Seasonal-produce source (European fruit & veg by month/country). Presented to
+# the model as a plain KitchenOwl feature; the fetch is an implementation detail.
+_SEASONAL_SOURCE = "https://www.eufic.org/en/global/ajax-map"
+_SEASONAL_TTL = 21600  # 6h — the data changes at most seasonally
+_seasonal_cache: Dict[str, Any] = {"data": None, "at": 0.0}
 
 
 def _config_section() -> Dict[str, Any]:
@@ -214,6 +223,70 @@ async def _async_search_recipes(
     return {"query": query, "count": len(recipes), "recipes": recipes}
 
 
+async def _fetch_seasonal() -> Dict[str, Any]:
+    """Fetch + parse the seasonal produce table, cached in-process for a while.
+
+    The source returns a JavaScript assignment ``var fvlist = {...};`` whose
+    object maps ``{category: {produce: [[Month, Country], ...]}}``.
+    """
+    now = time.time()
+    cached = _seasonal_cache.get("data")
+    if cached is not None and (now - _seasonal_cache.get("at", 0.0)) < _SEASONAL_TTL:
+        return cached
+
+    import aiohttp
+
+    headers = {"User-Agent": "Mozilla/5.0 (hermes-agent)"}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            _SEASONAL_SOURCE, headers=headers, timeout=aiohttp.ClientTimeout(total=20)
+        ) as resp:
+            resp.raise_for_status()
+            raw = await resp.text()
+
+    start, end = raw.find("{"), raw.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError("unexpected seasonal data format")
+    data = json.loads(raw[start:end + 1])
+
+    _seasonal_cache["data"] = data
+    _seasonal_cache["at"] = now
+    return data
+
+
+async def _async_produce_in_season(
+    country: Optional[str] = None, month: Optional[str] = None
+) -> Dict[str, Any]:
+    data = await _fetch_seasonal()
+
+    target_month = (month or datetime.now().strftime("%B")).strip().lower()
+    target_country = country.strip().lower() if country else None
+
+    out: Dict[str, list] = {}
+    for category, produce in data.items():
+        names = set()
+        for name, pairs in (produce or {}).items():
+            for entry in pairs:
+                if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+                    continue
+                mo = str(entry[0]).strip().lower()
+                co = str(entry[1]).strip().lower()
+                if mo != target_month:
+                    continue
+                if target_country and co != target_country:
+                    continue
+                names.add(str(name).strip())
+                break
+        out[category.strip().lower()] = sorted(names)
+
+    return {
+        "month": (month or datetime.now().strftime("%B")).strip(),
+        "country": country.strip() if country else "any (Europe)",
+        "produce": out,
+        "count": sum(len(v) for v in out.values()),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Sync wrappers (handler signature: (args, **kw) -> str)
 # ---------------------------------------------------------------------------
@@ -297,6 +370,17 @@ def _handle_search_recipes(args: dict, **kw) -> str:
     except Exception as e:
         logger.error("kitchenowl_search_recipes error: %s", e)
         return tool_error(f"Failed to search recipes for '{query}': {e}")
+
+
+def _handle_produce_in_season(args: dict, **kw) -> str:
+    try:
+        result = _run_async(
+            _async_produce_in_season(args.get("country"), args.get("month"))
+        )
+        return json.dumps({"result": result})
+    except Exception as e:
+        logger.error("kitchenowl_produce_in_season error: %s", e)
+        return tool_error(f"Failed to get seasonal produce: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +510,36 @@ KITCHENOWL_SEARCH_RECIPES_SCHEMA = {
     },
 }
 
+KITCHENOWL_PRODUCE_SCHEMA = {
+    "name": "kitchenowl_produce_in_season",
+    "description": (
+        "Get fruits and vegetables that are in season right now (European "
+        "seasonal produce). Useful for suggesting what to add to a shopping "
+        "list or which recipes to cook. Optionally pass a country for local "
+        "results (e.g. 'Spain', 'Poland'); otherwise returns produce in season "
+        "anywhere in Europe. Defaults to the current month."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "country": {
+                "type": "string",
+                "description": (
+                    "Country to get local seasonal produce for (e.g. 'Spain', "
+                    "'Poland', 'Germany', 'Italy'). Omit for all of Europe."
+                ),
+            },
+            "month": {
+                "type": "string",
+                "description": (
+                    "Month name (e.g. 'August'). Omit to use the current month."
+                ),
+            },
+        },
+        "required": [],
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # Registration
@@ -474,6 +588,15 @@ registry.register(
     toolset="kitchenowl",
     schema=KITCHENOWL_SEARCH_RECIPES_SCHEMA,
     handler=_handle_search_recipes,
+    check_fn=_check_available,
+    emoji="🦉",
+)
+
+registry.register(
+    name="kitchenowl_produce_in_season",
+    toolset="kitchenowl",
+    schema=KITCHENOWL_PRODUCE_SCHEMA,
+    handler=_handle_produce_in_season,
     check_fn=_check_available,
     emoji="🦉",
 )
