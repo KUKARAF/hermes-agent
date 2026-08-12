@@ -239,6 +239,18 @@ TOOLSETS = {
         "includes": []
     },
 
+    "kitchenowl": {
+        "description": "KitchenOwl shopping lists and recipes",
+        "tools": [
+            "kitchenowl_list_lists",
+            "kitchenowl_get_items",
+            "kitchenowl_add_item",
+            "kitchenowl_remove_item",
+            "kitchenowl_search_recipes",
+        ],
+        "includes": []
+    },
+
     "kanban": {
         "description": (
             "Kanban multi-agent coordination — only active when the agent "
