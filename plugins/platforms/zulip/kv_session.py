@@ -72,7 +72,15 @@ async def request_kv_session_via_zulip(
         Write the token to ``~/.config/kv/config.toml`` on success (default: True).
     """
     # ── Resolve Zulip credentials ────────────────────────────────────────────
-    server_url = (zulip_server_url or os.getenv("ZULIP_SERVER_URL", "")).rstrip("/")
+    # Prefer ZULIP_SITE_URL (the key online_kv provides and the adapter uses);
+    # fall back to ZULIP_SERVER_URL for older setups. Using only the latter meant
+    # an all-KV deployment (ZULIP_SITE_URL) could not deliver the approval link,
+    # so session renewals stalled silently.
+    server_url = (
+        zulip_server_url
+        or os.getenv("ZULIP_SITE_URL", "")
+        or os.getenv("ZULIP_SERVER_URL", "")
+    ).rstrip("/")
     bot_email = zulip_bot_email or os.getenv("ZULIP_BOT_EMAIL", "")
     api_key = zulip_api_key or os.getenv("ZULIP_API_KEY", "")
 
@@ -101,7 +109,7 @@ async def request_kv_session_via_zulip(
     else:
         missing = []
         if not server_url:
-            missing.append("ZULIP_SERVER_URL")
+            missing.append("ZULIP_SITE_URL")
         if not bot_email:
             missing.append("ZULIP_BOT_EMAIL")
         if not api_key:
